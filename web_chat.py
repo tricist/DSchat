@@ -1,11 +1,17 @@
 import os
 import time
+import json
+import glob
 import streamlit as st
 from openai import OpenAI
 from dotenv import load_dotenv
 
 # 加载环境变量
 load_dotenv()
+
+# 创建历史对话存储目录
+CHATS_DIR = "chats"
+os.makedirs(CHATS_DIR, exist_ok=True)
 
 # 设置页面标题
 st.set_page_config(page_title="DeepSeek", page_icon="🤖")
@@ -34,6 +40,56 @@ def init_or_reset_chat():
     st.session_state.messages = [
         {"role": "system", "content": ROLES.get(role_name, ROLES["均衡默认"])}
     ]
+    # 生成一个新的时间戳作为对话ID
+    st.session_state.current_chat_id = str(int(time.time() * 1000))
+    st.session_state.chat_title = "新对话"
+
+# 将当前对话保存到本地 JSON 文件
+def save_current_chat():
+    if "current_chat_id" not in st.session_state:
+        return
+    
+    # 尝试自动从第一句用户输入生成标题
+    if st.session_state.chat_title == "新对话":
+        for msg in st.session_state.messages:
+            if msg["role"] == "user":
+                st.session_state.chat_title = msg["content"][:15] + ("..." if len(msg["content"])>15 else "")
+                break
+
+    file_path = os.path.join(CHATS_DIR, f"{st.session_state.current_chat_id}.json")
+    data = {
+        "id": st.session_state.current_chat_id,
+        "title": st.session_state.chat_title,
+        "messages": st.session_state.messages
+    }
+    with open(file_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+# 从本地 JSON 文件加载对话
+def load_chat(file_path):
+    with open(file_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+        st.session_state.messages = data.get("messages", [])
+        st.session_state.current_chat_id = data.get("id")
+        st.session_state.chat_title = data.get("title", "未命名对话")
+
+# 缓存历史对话列表，避免每次刷新重复读取全部文件
+@st.cache_data(ttl=1)
+def get_history_chats():
+    if not os.path.exists(CHATS_DIR):
+        return []
+    files = glob.glob(os.path.join(CHATS_DIR, "*.json"))
+    files.sort(reverse=True)
+    res = []
+    # 最多只读取最近 30 条，大幅提升侧边栏加载速度
+    for f in files[:30]:
+        try:
+            with open(f, "r", encoding="utf-8") as file:
+                data = json.load(file)
+                res.append({"id": data.get("id"), "title": data.get("title", "未命名对话"), "path": f})
+        except:
+            continue
+    return res
 
 # 简单的密码验证逻辑
 def check_password():
@@ -114,6 +170,22 @@ with st.sidebar:
         init_or_reset_chat()
         st.rerun()
 
+    st.divider()
+    st.subheader("历史记录")
+    
+    # 获取被缓存的历史记录列表
+    history_list = get_history_chats()
+    for item in history_list:
+        chat_id = item["id"]
+        title = item["title"]
+        is_current = (chat_id == st.session_state.get("current_chat_id"))
+        label = f"🔵 {title}" if is_current else f"💬 {title}"
+        
+        # 单击历史文件将其加载到屏幕中央
+        if st.button(label, key=f"btn_{chat_id}", use_container_width=True):
+            load_chat(item["path"])
+            st.rerun()
+
 # 显示历史对话记录 (跳过系统提示词)
 for msg in st.session_state.messages:
     if msg["role"] != "system":
@@ -136,6 +208,7 @@ if prompt := st.chat_input("请输入文本"):
     
     # 2. 把用户的问题追加到历史记录中
     st.session_state.messages.append({"role": "user", "content": prompt})
+    # 这里不需要立刻存硬盘，忍住！
     
     # 3. 请求大模型并展示回答（这里为了体验更好，使用流式输出 stream=True）
     with st.chat_message("assistant"):
@@ -200,3 +273,7 @@ if prompt := st.chat_input("请输入文本"):
         
     # 4. 把 AI 的回答追加到历史记录中
     st.session_state.messages.append({"role": "assistant", "content": full_response})
+    
+    # 【性能优化关键】：AI 答复完之后，才合并进行一次“集中的保存”，绝不打断打字流
+    save_current_chat() 
+    get_history_chats.clear() # 清空侧边栏列表缓存，告知最新的一条有更新

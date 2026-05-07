@@ -30,7 +30,7 @@ client = get_client()
 # 定义一个初始化或重置对话的函数
 def init_or_reset_chat():
     st.session_state.messages = [
-        {"role": "system", "content": "You are a helpful assistant. Please strictly use `$` for inline math and `$$` for block math formulas."}
+        {"role": "system", "content": "You are a helpful assistant. Answer naturally based on the user's input. ONLY WHEN your response inherently involves mathematical formulas, use `$` for inline math and `$$` for block math formulas. Do not force mathematical explanations if not requested."}
     ]
     # 生成一个新的时间戳作为对话ID
     st.session_state.current_chat_id = str(int(time.time() * 1000))

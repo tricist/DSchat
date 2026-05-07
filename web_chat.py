@@ -118,8 +118,7 @@ if prompt := st.chat_input("请输入文本"):
     
     # 3. 请求大模型并展示回答（这里为了体验更好，使用流式输出 stream=True）
     with st.chat_message("assistant"):
-        if enable_thinking:
-            thinking_placeholder = st.empty()
+        thinking_placeholder = st.empty()
         message_placeholder = st.empty()
         
         full_response = ""
@@ -134,6 +133,8 @@ if prompt := st.chat_input("请输入文本"):
         if enable_thinking:
             api_kwargs["reasoning_effort"] = reasoning_effort
             api_kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
+        else:
+            api_kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
             
         # 请求 API
         response = client.chat.completions.create(**api_kwargs)

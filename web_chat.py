@@ -74,7 +74,7 @@ def load_chat(file_path):
         st.session_state.chat_title = data.get("title", "未命名对话")
 
 # 缓存历史对话列表，避免每次刷新重复读取全部文件
-@st.cache_data(ttl=1)
+@st.cache_data
 def get_history_chats():
     if not os.path.exists(CHATS_DIR):
         return []
@@ -87,7 +87,8 @@ def get_history_chats():
             with open(f, "r", encoding="utf-8") as file:
                 data = json.load(file)
                 res.append({"id": data.get("id"), "title": data.get("title", "未命名对话"), "path": f})
-        except:
+        except Exception as e:
+            print(f"解析历史记录出错 {f}: {e}")
             continue
     return res
 
@@ -186,18 +187,20 @@ with st.sidebar:
             load_chat(item["path"])
             st.rerun()
 
+def format_latex(text):
+    """提取公共方法：将模型可能输出的 \( 和 \[ 替换为受支持的 $ 和 $$"""
+    import re
+    t = re.sub(r'(?<!\\)\\\[', '\n$$\n', text)
+    t = re.sub(r'(?<!\\)\\\]', '\n$$\n', text)
+    t = re.sub(r'(?<!\\)\\\(', '$', t)
+    t = re.sub(r'(?<!\\)\\\)', '$', t)
+    return t
+
 # 显示历史对话记录 (跳过系统提示词)
 for msg in st.session_state.messages:
     if msg["role"] != "system":
         with st.chat_message(msg["role"]):
-            # 将模型可能输出的 \( 和 \[ 替换为受支持的 $ 和 $$，同时避免破坏 \\[ 这种 LaTeX 换行符
-            import re
-            display_text = msg["content"]
-            display_text = re.sub(r'(?<!\\)\\\[', '\n$$\n', display_text)
-            display_text = re.sub(r'(?<!\\)\\\]', '\n$$\n', display_text)
-            display_text = re.sub(r'(?<!\\)\\\(', '$', display_text)
-            display_text = re.sub(r'(?<!\\)\\\)', '$', display_text)
-            st.markdown(display_text)
+            st.markdown(format_latex(msg["content"]))
 
 # 接收用户输入
 if prompt := st.chat_input("请输入文本"):
@@ -230,46 +233,40 @@ if prompt := st.chat_input("请输入文本"):
         else:
             api_kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
             
-        # 请求 API
-        response = client.chat.completions.create(**api_kwargs)
-        
-        # 逐字渲染结果
-        for chunk in response:
-            delta = chunk.choices[0].delta
+        try:
+            # 请求 API
+            response = client.chat.completions.create(**api_kwargs)
             
-            # 兼容处理返回的思考过程内容
-            reasoning = getattr(delta, 'reasoning_content', None)
-            if reasoning:
-                full_thinking += reasoning
-                # 使用 st.info 容器通过图标和背景色区别“思考过程”
-                with thinking_placeholder.container():
-                    st.info(full_thinking + "▌", icon="🤔")
-            
-            if delta.content is not None:
-                # 当开始输出实际回复时，把思考过程的跳动光标移除
-                if full_thinking and not full_response:
+            # 逐字渲染结果
+            for chunk in response:
+                delta = chunk.choices[0].delta
+                
+                # 兼容处理返回的思考过程内容
+                reasoning = getattr(delta, 'reasoning_content', None)
+                if reasoning:
+                    full_thinking += reasoning
+                    # 使用 st.info 容器通过图标和背景色区别“思考过程”
                     with thinking_placeholder.container():
-                        st.info(full_thinking, icon="🤔")
-                        
-                full_response += delta.content
+                        st.info(full_thinking + "▌", icon="🤔")
                 
-                import re
-                display_text = full_response
-                display_text = re.sub(r'(?<!\\)\\\[', '\n$$\n', display_text)
-                display_text = re.sub(r'(?<!\\)\\\]', '\n$$\n', display_text)
-                display_text = re.sub(r'(?<!\\)\\\(', '$', display_text)
-                display_text = re.sub(r'(?<!\\)\\\)', '$', display_text)
-                
-                # st.markdown 原生支持 LaTeX ($...$ 和 $$...$$)，会自动渲染出来
-                message_placeholder.markdown(display_text + "▌")
-                
-        # 移除光标，完整显示
-        display_text = full_response
-        display_text = re.sub(r'(?<!\\)\\\[', '\n$$\n', display_text)
-        display_text = re.sub(r'(?<!\\)\\\]', '\n$$\n', display_text)
-        display_text = re.sub(r'(?<!\\)\\\(', '$', display_text)
-        display_text = re.sub(r'(?<!\\)\\\)', '$', display_text)
-        message_placeholder.markdown(display_text)
+                if delta.content is not None:
+                    # 当开始输出实际回复时，把思考过程的跳动光标移除
+                    if full_thinking and not full_response:
+                        with thinking_placeholder.container():
+                            st.info(full_thinking, icon="🤔")
+                            
+                    full_response += delta.content
+                    # st.markdown 原生支持 LaTeX ($...$ 和 $$...$$)，会自动渲染出来
+                    message_placeholder.markdown(format_latex(full_response) + "▌")
+                    
+            # 移除光标，完整显示
+            message_placeholder.markdown(format_latex(full_response))
+            
+        except Exception as e:
+            st.error(f"API 请求失败: {e}")
+            # 剔除刚才写入历史记录的用户提问，保证状态回退允许用户重试
+            st.session_state.messages.pop()
+            st.stop()
         
     # 4. 把 AI 的回答追加到历史记录中
     st.session_state.messages.append({"role": "assistant", "content": full_response})

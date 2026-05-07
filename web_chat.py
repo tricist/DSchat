@@ -1,17 +1,11 @@
 import os
 import time
-import json
-import glob
 import streamlit as st
 from openai import OpenAI
 from dotenv import load_dotenv
 
 # 加载环境变量
 load_dotenv()
-
-# 创建历史对话存储目录
-CHATS_DIR = "chats"
-os.makedirs(CHATS_DIR, exist_ok=True)
 
 # 设置页面标题
 st.set_page_config(page_title="DeepSeek", page_icon="🤖")
@@ -29,7 +23,7 @@ client = get_client()
 
 # 定义系统提示词角色
 ROLES = {
-    "均衡默认": "You are a helpful assistant.",
+    "均衡默认": "你是一个乐于助人的AI智能助手。请根据用户的输入自然、准确、友善地作答。\n- 请保持回答清晰、简洁、逻辑分明。\n- 遇到不知道或不确定的知识，请客观坦诚地告知，不编造虚假信息。\n- 只有在内容不可避免地涉及到少量数学公式时，才按需使用 `$` (行内) 或 `$$` (块级) 渲染。",
     "编码大师": "你是一名世界顶级的首席软件工程师和架构师。你的目标是输出最高质量、符合生产环境标准的代码。请严格遵循以下原则：\n1. 优先提供优雅、高效、可维护且符合该语言最佳实践的代码。\n2. 提供的代码尽量完整且可以直接运行，避免使用含糊的伪代码。\n3. 在代码中添加精练的中文注释以解释复杂的核心逻辑。\n4. 主动思考并指出潜在的边界条件（Edge Cases）、异常处理和性能优化建议。\n5. 减少过多不必要的寒暄，直奔技术要点和解决方案。",
     "数学大师": "你是一位极其严谨的理论数学家与受人尊敬的教授。请以极致的逻辑性和专业性回答问题。请严格遵循以下要求：\n1. 必须使用准确的 LaTeX 表达数学概念，行内公式严格使用 `$` 包裹，独立块级公式严格使用 `$$` 包裹。\n2. 对于计算或证明题，必须采取分步解析（Step-by-Step）的方式，写出清晰的演算过程。\n3. 在得出结论后，尽可能简要总结其背后的核心定理或数学直觉。\n4. 保持语言的学术性与严谨性。"
 }
@@ -40,39 +34,6 @@ def init_or_reset_chat():
     st.session_state.messages = [
         {"role": "system", "content": ROLES.get(role_name, ROLES["均衡默认"])}
     ]
-    # 生成一个新的时间戳作为对话ID
-    st.session_state.current_chat_id = str(int(time.time() * 1000))
-    st.session_state.chat_title = "新对话"
-
-# 将当前对话保存到本地 JSON 文件
-def save_current_chat():
-    if "current_chat_id" not in st.session_state:
-        return
-    
-    # 尝试自动从第一句用户输入生成标题
-    if st.session_state.chat_title == "新对话":
-        for msg in st.session_state.messages:
-            if msg["role"] == "user":
-                # 取前 15 个字符作为标题
-                st.session_state.chat_title = msg["content"][:15] + ("..." if len(msg["content"])>15 else "")
-                break
-
-    file_path = os.path.join(CHATS_DIR, f"{st.session_state.current_chat_id}.json")
-    data = {
-        "id": st.session_state.current_chat_id,
-        "title": st.session_state.chat_title,
-        "messages": st.session_state.messages
-    }
-    with open(file_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-# 从本地 JSON 文件加载对话
-def load_chat(file_path):
-    with open(file_path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-        st.session_state.messages = data.get("messages", [])
-        st.session_state.current_chat_id = data.get("id")
-        st.session_state.chat_title = data.get("title", "未命名对话")
 
 # 简单的密码验证逻辑
 def check_password():
@@ -153,32 +114,6 @@ with st.sidebar:
         init_or_reset_chat()
         st.rerun()
 
-    st.divider()
-    st.subheader("历史记录")
-    
-    # 扫描并显示历史对话
-    chat_files = glob.glob(os.path.join(CHATS_DIR, "*.json"))
-    # 按文件名递减排序（最新的在最上面）
-    chat_files.sort(reverse=True)
-    
-    for f in chat_files:
-        try:
-            with open(f, "r", encoding="utf-8") as file:
-                data = json.load(file)
-                title = data.get("title", "未命名对话")
-                chat_id = data.get("id", "")
-        except Exception:
-            continue
-        
-        # 标识当前选中的对话
-        is_current = (chat_id == st.session_state.get("current_chat_id"))
-        label = f"🔵 {title}" if is_current else f"💬 {title}"
-        
-        # 当点击旧对话时，加载数据并刷新界面
-        if st.button(label, key=f"btn_{chat_id}", use_container_width=True):
-            load_chat(f)
-            st.rerun()
-
 # 显示历史对话记录 (跳过系统提示词)
 for msg in st.session_state.messages:
     if msg["role"] != "system":
@@ -201,7 +136,6 @@ if prompt := st.chat_input("请输入文本"):
     
     # 2. 把用户的问题追加到历史记录中
     st.session_state.messages.append({"role": "user", "content": prompt})
-    save_current_chat() # 保存到本地
     
     # 3. 请求大模型并展示回答（这里为了体验更好，使用流式输出 stream=True）
     with st.chat_message("assistant"):
@@ -266,4 +200,3 @@ if prompt := st.chat_input("请输入文本"):
         
     # 4. 把 AI 的回答追加到历史记录中
     st.session_state.messages.append({"role": "assistant", "content": full_response})
-    save_current_chat() # 保存到本地

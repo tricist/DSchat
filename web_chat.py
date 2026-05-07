@@ -27,10 +27,18 @@ def get_client():
 
 client = get_client()
 
+# 定义系统提示词角色
+ROLES = {
+    "均衡默认": "你是一个乐于助人的AI智能助手。请根据用户的输入自然、准确、友善地作答。\n- 请保持回答清晰、简洁、逻辑分明。\n- 遇到不知道或不确定的知识，请客观坦诚地告知，不编造虚假信息。\n- 只有在内容不可避免地涉及到少量数学公式时，才按需使用 `$` (行内) 或 `$$` (块级) 渲染。",
+    "编码大师": "你是一名世界顶级的首席软件工程师和架构师。你的目标是输出最高质量、符合生产环境标准的代码。请严格遵循以下原则：\n1. 优先提供优雅、高效、可维护且符合该语言最佳实践的代码。\n2. 提供的代码尽量完整且可以直接运行，避免使用含糊的伪代码。\n3. 在代码中添加精练的中文注释以解释复杂的核心逻辑。\n4. 主动思考并指出潜在的边界条件（Edge Cases）、异常处理和性能优化建议。\n5. 减少过多不必要的寒暄，直奔技术要点和解决方案。",
+    "数学大师": "你是一位极其严谨的理论数学家与受人尊敬的教授。请以极致的逻辑性和专业性回答问题。请严格遵循以下要求：\n1. 必须使用准确的 LaTeX 表达数学概念，行内公式严格使用 `$` 包裹，独立块级公式严格使用 `$$` 包裹。\n2. 对于计算或证明题，必须采取分步解析（Step-by-Step）的方式，写出清晰的演算过程。\n3. 在得出结论后，尽可能简要总结其背后的核心定理或数学直觉。\n4. 保持语言的学术性与严谨性。"
+}
+
 # 定义一个初始化或重置对话的函数
 def init_or_reset_chat():
+    role_name = st.session_state.get("selected_role", "均衡默认")
     st.session_state.messages = [
-        {"role": "system", "content": "You are a helpful assistant. Answer naturally based on the user's input. ONLY WHEN your response inherently involves mathematical formulas, use `$` for inline math and `$$` for block math formulas. Do not force mathematical explanations if not requested."}
+        {"role": "system", "content": ROLES.get(role_name, ROLES["均衡默认"])}
     ]
     # 生成一个新的时间戳作为对话ID
     st.session_state.current_chat_id = str(int(time.time() * 1000))
@@ -104,12 +112,25 @@ if not check_password():
     st.stop()
 
 # 初始化对话历史，存放在 Streamlit 的 session_state 中
+if "selected_role" not in st.session_state:
+    st.session_state.selected_role = "均衡默认"
 if "messages" not in st.session_state:
     init_or_reset_chat()
 
 # 在侧边栏添加新建对话按钮
 with st.sidebar:
     st.title("功能菜单")
+    
+    # 添加角色选择下拉框
+    new_role = st.selectbox(
+        "选择助手角色",
+        list(ROLES.keys()),
+        index=list(ROLES.keys()).index(st.session_state.selected_role)
+    )
+    if new_role != st.session_state.selected_role:
+        st.session_state.selected_role = new_role
+        init_or_reset_chat()
+        st.rerun()
     
     # 添加模型选择下拉框
     selected_model = st.selectbox(

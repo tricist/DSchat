@@ -71,6 +71,24 @@ if "messages" not in st.session_state:
 # 在侧边栏添加新建对话按钮
 with st.sidebar:
     st.title("功能菜单")
+    
+    # 添加模型选择下拉框
+    selected_model = st.selectbox(
+        "选择模型",
+        ("deepseek-v4-pro", "deepseek-v4-flash"),
+        index=0
+    )
+    
+    # 添加思考模式开关和强度选择
+    enable_thinking = st.toggle("开启思考模式", value=False)
+    reasoning_effort = "high"
+    if enable_thinking:
+        reasoning_effort = st.selectbox(
+            "选择思考强度",
+            ("high", "max"),
+            index=0
+        )
+    
     if st.button("➕ 新建对话", use_container_width=True, type="primary"):
         init_or_reset_chat()
         st.rerun()
@@ -82,8 +100,8 @@ for msg in st.session_state.messages:
             # 将模型可能输出的 \( 和 \[ 替换为受支持的 $ 和 $$，同时避免破坏 \\[ 这种 LaTeX 换行符
             import re
             display_text = msg["content"]
-            display_text = re.sub(r'(?<!\\)\\\[', '$$', display_text)
-            display_text = re.sub(r'(?<!\\)\\\]', '$$', display_text)
+            display_text = re.sub(r'(?<!\\)\\\[', '\n$$\n', display_text)
+            display_text = re.sub(r'(?<!\\)\\\]', '\n$$\n', display_text)
             display_text = re.sub(r'(?<!\\)\\\(', '$', display_text)
             display_text = re.sub(r'(?<!\\)\\\)', '$', display_text)
             st.markdown(display_text)
@@ -100,26 +118,50 @@ if prompt := st.chat_input("请输入文本"):
     
     # 3. 请求大模型并展示回答（这里为了体验更好，使用流式输出 stream=True）
     with st.chat_message("assistant"):
+        if enable_thinking:
+            thinking_placeholder = st.empty()
         message_placeholder = st.empty()
-        full_response = ""
         
+        full_response = ""
+        full_thinking = ""
+        
+        # 准备 API 请求参数
+        api_kwargs = {
+            "model": selected_model,
+            "messages": st.session_state.messages,
+            "stream": True,
+        }
+        if enable_thinking:
+            api_kwargs["reasoning_effort"] = reasoning_effort
+            api_kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
+            
         # 请求 API
-        response = client.chat.completions.create(
-            model="deepseek-v4-pro",
-            messages=st.session_state.messages,
-            stream=True, # 开启流式输出，打字机效果
-            # 注: stream 模式下如果开启 thinking，目前 SDK 解析可能有所不同，这里先去掉 extra_body 保持基本对话畅通
-        )
+        response = client.chat.completions.create(**api_kwargs)
         
         # 逐字渲染结果
         for chunk in response:
-            if chunk.choices[0].delta.content is not None:
-                full_response += chunk.choices[0].delta.content
+            delta = chunk.choices[0].delta
+            
+            # 兼容处理返回的思考过程内容
+            reasoning = getattr(delta, 'reasoning_content', None)
+            if reasoning:
+                full_thinking += reasoning
+                # 使用 st.info 容器通过图标和背景色区别“思考过程”
+                with thinking_placeholder.container():
+                    st.info(full_thinking + "▌", icon="🤔")
+            
+            if delta.content is not None:
+                # 当开始输出实际回复时，把思考过程的跳动光标移除
+                if full_thinking and not full_response:
+                    with thinking_placeholder.container():
+                        st.info(full_thinking, icon="🤔")
+                        
+                full_response += delta.content
                 
                 import re
                 display_text = full_response
-                display_text = re.sub(r'(?<!\\)\\\[', '$$', display_text)
-                display_text = re.sub(r'(?<!\\)\\\]', '$$', display_text)
+                display_text = re.sub(r'(?<!\\)\\\[', '\n$$\n', display_text)
+                display_text = re.sub(r'(?<!\\)\\\]', '\n$$\n', display_text)
                 display_text = re.sub(r'(?<!\\)\\\(', '$', display_text)
                 display_text = re.sub(r'(?<!\\)\\\)', '$', display_text)
                 
@@ -128,8 +170,8 @@ if prompt := st.chat_input("请输入文本"):
                 
         # 移除光标，完整显示
         display_text = full_response
-        display_text = re.sub(r'(?<!\\)\\\[', '$$', display_text)
-        display_text = re.sub(r'(?<!\\)\\\]', '$$', display_text)
+        display_text = re.sub(r'(?<!\\)\\\[', '\n$$\n', display_text)
+        display_text = re.sub(r'(?<!\\)\\\]', '\n$$\n', display_text)
         display_text = re.sub(r'(?<!\\)\\\(', '$', display_text)
         display_text = re.sub(r'(?<!\\)\\\)', '$', display_text)
         message_placeholder.markdown(display_text)

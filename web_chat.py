@@ -188,13 +188,21 @@ with st.sidebar:
             st.rerun()
 
 def format_latex(text):
-    """提取公共方法：将模型可能输出的 \( 和 \[ 替换为受支持的 $ 和 $$"""
-    import re
-    t = re.sub(r'(?<!\\)\\\[', '\n$$\n', text)
-    t = re.sub(r'(?<!\\)\\\]', '\n$$\n', text)
-    t = re.sub(r'(?<!\\)\\\(', '$', t)
-    t = re.sub(r'(?<!\\)\\\)', '$', t)
-    return t
+    r"""提取公共方法：将模型可能输出的 \( 和 \[ 替换为受支持的 $ 和 $$"""
+    # 临时保护 \\[ 和 \\] (通常用于矩阵或多行公式的换行)，避免被错误替换
+    text = text.replace(r'\\[', '___TEMP_LBRACKET___')
+    text = text.replace(r'\\]', '___TEMP_RBRACKET___')
+    
+    # 替换常规的数学公式首尾标识符
+    text = text.replace(r'\[', '$$')
+    text = text.replace(r'\]', '$$')
+    text = text.replace(r'\(', '$')
+    text = text.replace(r'\)', '$')
+    
+    # 恢复被保护的换行符
+    text = text.replace('___TEMP_LBRACKET___', r'\\[')
+    text = text.replace('___TEMP_RBRACKET___', r'\\]')
+    return text
 
 # 显示历史对话记录 (跳过系统提示词)
 for msg in st.session_state.messages:

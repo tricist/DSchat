@@ -258,7 +258,7 @@ if prompt := st.chat_input("请输入文本"):
         
         full_response = ""
         full_thinking = ""
-        update_counter = 0  # 用于限制 UI 刷新频率
+        last_update_time = 0  # 使用时间戳控制刷新频率，彻底解决长文本越往后越卡的现象
         
         # 准备 API 请求参数
         api_kwargs = {
@@ -279,15 +279,16 @@ if prompt := st.chat_input("请输入文本"):
             # 逐字渲染结果
             for chunk in response:
                 delta = chunk.choices[0].delta
-                update_counter += 1
+                current_time = time.time()
                 
                 # 兼容处理返回的思考过程内容
                 reasoning = getattr(delta, 'reasoning_content', None)
                 if reasoning:
                     full_thinking += reasoning
-                    # 优化：降低UI更新频率，并且避免嵌套 container
-                    if update_counter % 5 == 0:
+                    # 优化：按照真实时间跨度只抽样刷新 UI（例如限制最高约12帧/秒），不管字数多少，彻底避免长文本卡顿
+                    if current_time - last_update_time > 0.08:
                         thinking_placeholder.info(full_thinking + "▌", icon="🤔")
+                        last_update_time = current_time
                 
                 if delta.content is not None:
                     # 当开始输出实际回复时，把思考过程的跳动光标移除
@@ -295,9 +296,10 @@ if prompt := st.chat_input("请输入文本"):
                         thinking_placeholder.info(full_thinking, icon="🤔")
                             
                     full_response += delta.content
-                    # 优化渲染频率：攒几个 token 刷新一次前端 UI，避免频繁渲染导致浏览器卡死
-                    if update_counter % 5 == 0:
+                    # 优化：采用基于时间的时间节流（Throttle）技术，而非单纯计次数。文本越长浏览器也不会被拖死运行计算
+                    if current_time - last_update_time > 0.08:
                         message_placeholder.markdown(format_latex(full_response) + "▌")
+                        last_update_time = current_time
                     
             # 渲染结束，进行最后一次完整显示，确保不漏掉最后的字符
             if full_thinking:

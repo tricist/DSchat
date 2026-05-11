@@ -111,8 +111,8 @@ def get_history_chats():
     files = glob.glob(os.path.join(CHATS_DIR, "*.json"))
     files.sort(reverse=True)
     res = []
-    # 最多只读取最近 30 条，大幅提升侧边栏加载速度
-    for f in files[:30]:
+    # 最多只读取最近 5 条，大幅提升侧边栏加载速度
+    for f in files[:5]:
         try:
             with open(f, "r", encoding="utf-8") as file:
                 data = json.load(file)

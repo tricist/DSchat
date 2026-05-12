@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import json
 import glob
@@ -188,7 +189,14 @@ with st.sidebar:
             st.rerun()
 
 def format_latex(text):
-    r"""提取公共方法：将模型可能输出的 \( 和 \[ 替换为受支持的 $ 和 $$"""
+    r"""将模型输出中的 LaTeX 标识符标准化为 Streamlit (KaTeX) 可渲染的格式。
+    
+    处理三个主要问题：
+    1. 将 \(...\) 转换为 $...$（行内公式）
+    2. 将 \[...\] 转换为 $$...$$（块级公式）
+    3. 自动修复缺失的 \begin{aligned} 环境——当 $$...$$ 块内使用了 & 对齐符
+       但没有对齐环境包裹时，自动补全 \begin{aligned}...\end{aligned}
+    """
     # 临时保护 \\[ 和 \\] (通常用于矩阵或多行公式的换行)，避免被错误替换
     text = text.replace(r'\\[', '___TEMP_LBRACKET___')
     text = text.replace(r'\\]', '___TEMP_RBRACKET___')
@@ -202,6 +210,27 @@ def format_latex(text):
     # 恢复被保护的换行符
     text = text.replace('___TEMP_LBRACKET___', r'\\[')
     text = text.replace('___TEMP_RBRACKET___', r'\\]')
+    
+    # ★ 自动修复：检测 $$...$$ 块内缺失对齐环境的 & 符号
+    # DeepSeek 模型偶尔会输出 \end{aligned} 但遗漏 \begin{aligned}，
+    # 或者直接在对齐公式中使用 & 而完全不包裹 aligned 环境，
+    # 这会导致 KaTeX 报错 "Expected 'EOF', got '&'"
+
+    def fix_missing_aligned(match):
+        r"""若 $$ 块内含 & 且缺少对齐环境，则自动包裹 \begin{aligned}...\end{aligned}"""
+        content = match.group(1)
+        # 已有对齐环境（aligned, array, matrix, cases 等）则不处理
+        if re.search(r'\\begin\{(?:aligned|array|matrix|pmatrix|bmatrix|cases|align|gather|split)\}', content):
+            return f'$${content}$$'
+        # 包含 & 对齐符但缺少环境 → 自动补全 aligned
+        if '&' in content:
+            # 若已有残留的 \end{aligned} 则移除（防止重复闭合）
+            content = re.sub(r'\\end\{aligned\}', '', content)
+            return f'$$\\begin{{aligned}}\n{content}\n\\end{{aligned}}$$'
+        return f'$${content}$$'
+    
+    text = re.sub(r'\$\$(.+?)\$\$', fix_missing_aligned, text, flags=re.DOTALL)
+    
     return text
 
 # 显示历史对话记录 (跳过系统提示词)
@@ -231,15 +260,21 @@ if prompt := st.chat_input("请输入文本"):
     st.session_state.messages.append({"role": "user", "content": prompt})
     # 这里不需要立刻存硬盘，忍住！
     
-    # 3. 请求大模型并展示回答（这里为了体验更好，使用流式输出 stream=True）
+    # 3. 请求大模型并展示回答（性能优化：分离思考与回复的渲染容器）
     with st.chat_message("assistant"):
-        # ★ 关键修复：只使用一个 st.empty() 占位符，避免两个占位符交替更新
-        # 导致 Streamlit 前端 DOM 重绘时影响已渲染的历史消息 CSS（文本发白现象）
+        # ★ 性能优化核心：使用两个独立容器，彻底解耦思考过程和回复内容的渲染
+        # 优化前：思考 + 回复拼在一个 HTML 字符串中，每次全量重绘（O(n²)）
+        # 优化后：
+        #   - 思考容器：仅在思考阶段更新，完成后立即"冻结"，不再参与后续重绘
+        #   - 回复容器：仅渲染回复文本，虽然仍为全量替换，但文本量大幅缩小
+        #   - 消除"思考 HTML 反复重建"产生的额外序列化 / Markdown 解析开销
+        thinking_placeholder = st.empty()
         response_placeholder = st.empty()
         
         full_response = ""
         full_thinking = ""
-        last_update_time = 0  # 使用时间戳控制刷新频率，彻底解决长文本越往后越卡的现象
+        saved_thinking = ""  # 保存思考内容副本，避免被清空标记覆盖
+        last_update_time = 0
         
         # 准备 API 请求参数
         api_kwargs = {
@@ -254,67 +289,54 @@ if prompt := st.chat_input("请输入文本"):
             api_kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
             
         try:
-            # 请求 API
             response = client.chat.completions.create(**api_kwargs)
             
-            # 逐字渲染结果
             for chunk in response:
                 delta = chunk.choices[0].delta
                 current_time = time.time()
                 
-                # 兼容处理返回的思考过程内容
                 reasoning = getattr(delta, 'reasoning_content', None)
                 if reasoning:
                     full_thinking += reasoning
+                    # 思考阶段：单独更新思考容器（内容较短，重绘开销极小）
+                    # 此阶段不触发回复容器更新，互不干扰
+                    thinking_html = (
+                        f'<div style="background:rgba(128,128,128,0.1);'
+                        f'border-left:4px solid rgba(128,128,128,0.35);'
+                        f'padding:10px 14px;border-radius:4px;margin-bottom:8px;'
+                        f'font-size:0.92em;line-height:1.6;">'
+                        f'🤔 <strong>思考中...</strong><br>{full_thinking}▌</div>'
+                    )
+                    thinking_placeholder.markdown(thinking_html, unsafe_allow_html=True)
                 
                 if delta.content is not None:
                     full_response += delta.content
-                
-                # 使用单一占位符统一渲染，消除 DOM 抖动
-                if current_time - last_update_time > 0.08:
-                    # 根据当前状态构建完整的 Markdown 内容
-                    parts = []
+                    
+                    # 思考完成，冻结思考容器为可折叠块（此后不再更新此容器）
                     if full_thinking:
-                        if not full_response:
-                            # 还在思考阶段：显示思考过程 + 闪烁光标（灰色，与完成后统一）
-                            thinking_html = (
-                                f'<div style="background:rgba(128,128,128,0.1);border-left:4px solid rgba(128,128,128,0.35);'
-                                f'padding:10px 14px;border-radius:4px;margin-bottom:8px;'
-                                f'font-size:0.92em;line-height:1.6;">'
-                                f'🤔 <strong>思考中...</strong><br>{full_thinking}▌</div>'
-                            )
-                            parts.append(thinking_html)
-                        else:
-                            # 已有回复：显示完整思考过程（可折叠）+ 回复内容 + 光标
-                            thinking_html = (
-                                f'<div style="background:rgba(128,128,128,0.1);border-left:4px solid rgba(128,128,128,0.35);'
-                                f'padding:8px 14px;border-radius:4px;margin-bottom:10px;'
-                                f'font-size:0.9em;line-height:1.6;">'
-                                f'<details open><summary>🤔 <strong>思考过程</strong></summary>'
-                                f'{full_thinking}</details></div>'
-                            )
-                            parts.append(thinking_html)
-                            parts.append(format_latex(full_response) + "▌")
-                    else:
-                        # 无思考模式：直接显示回复
-                        parts.append(format_latex(full_response) + "▌")
+                        saved_thinking = full_thinking
+                        thinking_html = (
+                            f'<div style="background:rgba(128,128,128,0.1);'
+                            f'border-left:4px solid rgba(128,128,128,0.35);'
+                            f'padding:8px 14px;border-radius:4px;margin-bottom:10px;'
+                            f'font-size:0.9em;line-height:1.6;">'
+                            f'<details open><summary>🤔 <strong>思考过程</strong></summary>'
+                            f'{saved_thinking}</details></div>'
+                        )
+                        thinking_placeholder.markdown(thinking_html, unsafe_allow_html=True)
+                        full_thinking = ""  # 清空标记，确保不再进入思考更新分支
                     
-                    response_placeholder.markdown("\n\n".join(parts), unsafe_allow_html=True)
-                    last_update_time = current_time
-                    
-            # 渲染结束，进行最后一次完整显示（去掉光标），确保不漏掉最后的字符
-            parts = []
-            if full_thinking:
-                thinking_html = (
-                    f'<div style="background:rgba(128,128,128,0.1);border-left:4px solid rgba(128,128,128,0.35);'
-                    f'padding:8px 14px;border-radius:4px;margin-bottom:10px;'
-                    f'font-size:0.9em;line-height:1.6;">'
-                    f'<details open><summary>🤔 <strong>思考过程</strong></summary>'
-                    f'{full_thinking}</details></div>'
-                )
-                parts.append(thinking_html)
-            parts.append(format_latex(full_response))
-            response_placeholder.markdown("\n\n".join(parts), unsafe_allow_html=True)
+                    # 回复容器：仅更新回复文本（不含冗长的思考 HTML）
+                    # 节流策略保持不变，短文本可适当降低间隔以提升流畅度
+                    if current_time - last_update_time > 0.06:
+                        response_placeholder.markdown(
+                            format_latex(full_response) + "▌",
+                            unsafe_allow_html=False
+                        )
+                        last_update_time = current_time
+            
+            # 渲染结束，最终静态显示（去掉光标）
+            response_placeholder.markdown(format_latex(full_response), unsafe_allow_html=False)
             
         except Exception as e:
             st.error(f"API 请求失败: {e}")
@@ -323,7 +345,7 @@ if prompt := st.chat_input("请输入文本"):
             st.stop()
         
     # 4. 把 AI 的回答（含思考过程）追加到历史记录中
-    st.session_state.messages.append({"role": "assistant", "content": full_response, "thinking": full_thinking})
+    st.session_state.messages.append({"role": "assistant", "content": full_response, "thinking": saved_thinking})
     
     # 【性能优化关键】：AI 答复完之后，才合并进行一次“集中的保存”，绝不打断打字流
     save_current_chat() 

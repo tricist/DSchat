@@ -18,8 +18,7 @@ st.set_page_config(page_title="DeepSeek", page_icon="🤖")
 st.title("DeepSeek Web 聊天助手")
 
 # 注入隐藏的 JS 监听 Ctrl+K (或 Cmd+K) 快捷键新建对话
-import streamlit.components.v1 as components
-components.html(
+st.html(
     """
     <script>
     const doc = window.parent.document;
@@ -43,8 +42,7 @@ components.html(
         doc.head.appendChild(script);
     }
     </script>
-    """,
-    height=0, width=0
+    """
 )
 
 # 初始化 OpenAI 客户端
@@ -188,7 +186,7 @@ with st.sidebar:
     )
     
     # 添加思考模式开关和强度选择
-    enable_thinking = st.toggle("开启思考模式", value=False)
+    enable_thinking = st.toggle("开启思考模式", value=True)
     reasoning_effort = "high"
     if enable_thinking:
         reasoning_effort = st.selectbox(
@@ -253,8 +251,9 @@ if prompt := st.chat_input("请输入文本"):
     
     # 3. 请求大模型并展示回答（这里为了体验更好，使用流式输出 stream=True）
     with st.chat_message("assistant"):
-        thinking_placeholder = st.empty()
-        message_placeholder = st.empty()
+        # ★ 关键修复：只使用一个 st.empty() 占位符，避免两个占位符交替更新
+        # 导致 Streamlit 前端 DOM 重绘时影响已渲染的历史消息 CSS（文本发白现象）
+        response_placeholder = st.empty()
         
         full_response = ""
         full_thinking = ""
@@ -285,26 +284,55 @@ if prompt := st.chat_input("请输入文本"):
                 reasoning = getattr(delta, 'reasoning_content', None)
                 if reasoning:
                     full_thinking += reasoning
-                    # 优化：按照真实时间跨度只抽样刷新 UI（例如限制最高约12帧/秒），不管字数多少，彻底避免长文本卡顿
-                    if current_time - last_update_time > 0.08:
-                        thinking_placeholder.info(full_thinking + "▌", icon="🤔")
-                        last_update_time = current_time
                 
                 if delta.content is not None:
-                    # 当开始输出实际回复时，把思考过程的跳动光标移除
-                    if full_thinking and not full_response:
-                        thinking_placeholder.info(full_thinking, icon="🤔")
-                            
                     full_response += delta.content
-                    # 优化：采用基于时间的时间节流（Throttle）技术，而非单纯计次数。文本越长浏览器也不会被拖死运行计算
-                    if current_time - last_update_time > 0.08:
-                        message_placeholder.markdown(format_latex(full_response) + "▌")
-                        last_update_time = current_time
+                
+                # 使用单一占位符统一渲染，消除 DOM 抖动
+                if current_time - last_update_time > 0.08:
+                    # 根据当前状态构建完整的 Markdown 内容
+                    parts = []
+                    if full_thinking:
+                        if not full_response:
+                            # 还在思考阶段：显示思考过程 + 闪烁光标（灰色，与完成后统一）
+                            thinking_html = (
+                                f'<div style="background:rgba(128,128,128,0.1);border-left:4px solid rgba(128,128,128,0.35);'
+                                f'padding:10px 14px;border-radius:4px;margin-bottom:8px;'
+                                f'font-size:0.92em;line-height:1.6;">'
+                                f'🤔 <strong>思考中...</strong><br>{full_thinking}▌</div>'
+                            )
+                            parts.append(thinking_html)
+                        else:
+                            # 已有回复：显示完整思考过程（可折叠）+ 回复内容 + 光标
+                            thinking_html = (
+                                f'<div style="background:rgba(128,128,128,0.1);border-left:4px solid rgba(128,128,128,0.35);'
+                                f'padding:8px 14px;border-radius:4px;margin-bottom:10px;'
+                                f'font-size:0.9em;line-height:1.6;">'
+                                f'<details open><summary>🤔 <strong>思考过程</strong></summary>'
+                                f'{full_thinking}</details></div>'
+                            )
+                            parts.append(thinking_html)
+                            parts.append(format_latex(full_response) + "▌")
+                    else:
+                        # 无思考模式：直接显示回复
+                        parts.append(format_latex(full_response) + "▌")
                     
-            # 渲染结束，进行最后一次完整显示，确保不漏掉最后的字符
+                    response_placeholder.markdown("\n\n".join(parts), unsafe_allow_html=True)
+                    last_update_time = current_time
+                    
+            # 渲染结束，进行最后一次完整显示（去掉光标），确保不漏掉最后的字符
+            parts = []
             if full_thinking:
-                thinking_placeholder.info(full_thinking, icon="🤔")
-            message_placeholder.markdown(format_latex(full_response))
+                thinking_html = (
+                    f'<div style="background:rgba(128,128,128,0.1);border-left:4px solid rgba(128,128,128,0.35);'
+                    f'padding:8px 14px;border-radius:4px;margin-bottom:10px;'
+                    f'font-size:0.9em;line-height:1.6;">'
+                    f'<details open><summary>🤔 <strong>思考过程</strong></summary>'
+                    f'{full_thinking}</details></div>'
+                )
+                parts.append(thinking_html)
+            parts.append(format_latex(full_response))
+            response_placeholder.markdown("\n\n".join(parts), unsafe_allow_html=True)
             
         except Exception as e:
             st.error(f"API 请求失败: {e}")

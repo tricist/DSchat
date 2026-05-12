@@ -236,6 +236,16 @@ def format_latex(text):
 for msg in st.session_state.messages:
     if msg["role"] != "system":
         with st.chat_message(msg["role"]):
+            # 如果消息包含思考过程，一并渲染
+            if msg.get("thinking"):
+                thinking_html = (
+                    f'<div style="background:rgba(128,128,128,0.1);border-left:4px solid rgba(128,128,128,0.35);'
+                    f'padding:8px 14px;border-radius:4px;margin-bottom:10px;'
+                    f'font-size:0.9em;line-height:1.6;">'
+                    f'<details><summary>🤔 <strong>思考过程</strong></summary>'
+                    f'{msg["thinking"]}</details></div>'
+                )
+                st.markdown(thinking_html, unsafe_allow_html=True)
             st.markdown(format_latex(msg["content"]))
 
 # 接收用户输入
@@ -340,8 +350,8 @@ if prompt := st.chat_input("请输入文本"):
             st.session_state.messages.pop()
             st.stop()
         
-    # 4. 把 AI 的回答追加到历史记录中
-    st.session_state.messages.append({"role": "assistant", "content": full_response})
+    # 4. 把 AI 的回答（含思考过程）追加到历史记录中
+    st.session_state.messages.append({"role": "assistant", "content": full_response, "thinking": full_thinking})
     
     # 【性能优化关键】：AI 答复完之后，才合并进行一次“集中的保存”，绝不打断打字流
     save_current_chat() 

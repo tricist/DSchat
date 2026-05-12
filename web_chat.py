@@ -17,34 +17,6 @@ os.makedirs(CHATS_DIR, exist_ok=True)
 st.set_page_config(page_title="DeepSeek", page_icon="🤖")
 st.title("DeepSeek Web 聊天助手")
 
-# 注入隐藏的 JS 监听 Ctrl+K (或 Cmd+K) 快捷键新建对话
-st.html(
-    """
-    <script>
-    const doc = window.parent.document;
-    if (!doc.getElementById('custom_shortcut_js')) {
-        const script = doc.createElement('script');
-        script.id = 'custom_shortcut_js';
-        script.type = 'text/javascript';
-        script.innerHTML = `
-            document.addEventListener('keydown', function(e) {
-                if ((e.ctrlKey || e.metaKey) && String(e.key).toLowerCase() === 'k') {
-                    e.preventDefault();
-                    // 查找内容包含“新建对话”的按钮并触发点击
-                    const buttons = Array.from(document.querySelectorAll('button'));
-                    const targetBtn = buttons.find(b => b.innerText.includes('新建对话'));
-                    if (targetBtn) {
-                        targetBtn.click();
-                    }
-                }
-            });
-        `;
-        doc.head.appendChild(script);
-    }
-    </script>
-    """
-)
-
 # 初始化 OpenAI 客户端
 @st.cache_resource # 缓存客户端，避免每次刷新页面重新实例化
 def get_client():

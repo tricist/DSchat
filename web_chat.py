@@ -6,7 +6,6 @@ import glob
 import hashlib
 import hmac
 import streamlit as st
-import streamlit.components.v1 as components
 from openai import OpenAI
 from dotenv import load_dotenv
 
@@ -53,8 +52,24 @@ def generate_auth_token() -> str:
     return f"{now}:{expiry}:{signature}"
 
 
+# Token 黑名单（服务端内存缓存，重启清空；用于实现可靠的"退出登录"）
+@st.cache_resource
+def _get_token_blacklist() -> set:
+    """返回全局 Token 黑名单集合。退出登录时加入，validate 时优先拒绝。"""
+    return set()
+
+
+def _invalidate_token(token: str):
+    """将指定 Token 加入黑名单（退出登录时调用）"""
+    if token:
+        _get_token_blacklist().add(token)
+
+
 def validate_auth_token(token: str) -> bool:
-    """验证 Token：检查签名完整性和是否过期"""
+    """验证 Token：检查黑名单 → 过期时间 → HMAC 签名完整性"""
+    # ★ 优先检查黑名单（退出登录的 Token 立即失效）
+    if token in _get_token_blacklist():
+        return False
     try:
         parts = token.split(':')
         if len(parts) != 3:
@@ -77,11 +92,12 @@ def validate_auth_token(token: str) -> bool:
 
 
 def _set_persistent_cookie(token: str, max_age_days: int = None):
-    """通过 JS 注入带 max-age 的持久化 Cookie（解决 st.context.cookies 仅设会话 Cookie 的问题）。
+    """双重写入持久化 Cookie：
+    1. st.context.cookies → HTTP 响应头 Set-Cookie（立即可用）
+    2. st.markdown <script> → 主页面 JS document.cookie + max-age（跨浏览器会话，移动端兼容）
     
-    双重写入策略：
-    1. st.context.cookies → HTTP 响应头 Set-Cookie，立即可用（但无 max-age，关闭浏览器即失效）
-    2. 本函数 → JS document.cookie + max-age，持久化存储（跨浏览器会话）
+    注意：使用 st.markdown 注入 <script> 而非 components.html（iframe），
+    因为移动端浏览器对 iframe 内 document.cookie 限制严格（ITP 等隐私策略）。
     """
     if max_age_days is None:
         max_age_days = TOKEN_MAX_AGE_DAYS
@@ -91,29 +107,33 @@ def _set_persistent_cookie(token: str, max_age_days: int = None):
         st.context.cookies[COOKIE_NAME] = token
     except Exception:
         pass
-    # JS 设持久化 Cookie（max-age 属性跨浏览器会话）
-    components.html(f"""
-    <script>
-    document.cookie = "{COOKIE_NAME}={token}; max-age={max_age_secs}; path=/; SameSite=Lax";
-    </script>
-    """, height=0)
+    # 主页面 JS 设持久化 Cookie（max-age 跨浏览器会话，移动端可靠）
+    st.markdown(
+        f'<script>document.cookie="{COOKIE_NAME}={token};max-age={max_age_secs};path=/";</script>',
+        unsafe_allow_html=True
+    )
 
 
 def _delete_persistent_cookie():
-    """双重清除 Cookie：HTTP 响应头 + JS（max-age=0 立即过期）"""
+    """双重清除 Cookie：HTTP 响应头 + 主页面 JS（max-age=0 立即过期）"""
     try:
         st.context.cookies[COOKIE_NAME] = ""
     except Exception:
         pass
-    components.html(f"""
-    <script>
-    document.cookie = "{COOKIE_NAME}=; max-age=0; path=/; SameSite=Lax";
-    </script>
-    """, height=0)
+    st.markdown(
+        f'<script>document.cookie="{COOKIE_NAME}=;max-age=0;path=/";</script>',
+        unsafe_allow_html=True
+    )
 
 
 def clear_auth_cookie():
-    """清除浏览器中的认证 Cookie（对外接口，内部调用双重清除）"""
+    """清除认证 Cookie 并将当前 Token 加入黑名单（彻底阻止自动登录）"""
+    # 先读取当前 Token 加入黑名单（关键：防止 Cookie 清除不彻底导致自动登回）
+    try:
+        current_token = st.context.cookies.get(COOKIE_NAME)
+        _invalidate_token(current_token or "")
+    except Exception:
+        pass
     _delete_persistent_cookie()
 
 # ==================== Cookie Token 认证 END ====================
@@ -342,11 +362,12 @@ with st.sidebar:
         init_or_reset_chat()
         st.rerun()
     
-    # 退出登录按钮（清除 Cookie，下次访问需重新输入密码）
+    # 退出登录按钮（黑名单 + Cookie 清除 + 延迟确保 JS 执行）
     if st.button("🚪 退出登录", use_container_width=True):
         clear_auth_cookie()
         st.session_state.authenticated = False
         st.session_state.login_attempts = 0
+        time.sleep(0.3)  # 给浏览器 300ms 执行 JS 清除持久化 Cookie
         st.rerun()
 
     st.divider()

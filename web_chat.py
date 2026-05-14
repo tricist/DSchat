@@ -74,6 +74,47 @@ def load_chat(file_path):
         st.session_state.current_chat_id = data.get("id")
         st.session_state.chat_title = data.get("title", "未命名对话")
 
+# 导出当前对话为 Markdown 格式
+def export_chat_as_markdown():
+    """将当前对话（不含系统提示词）导出为格式化的 Markdown 字符串"""
+    title = st.session_state.get("chat_title", "新对话")
+    lines = [f"# {title}", "", f"*导出时间：{time.strftime('%Y-%m-%d %H:%M:%S')}*", "", "---", ""]
+    for msg in st.session_state.messages:
+        if msg["role"] == "system":
+            continue
+        if msg["role"] == "user":
+            lines.append(f"## 👤 用户")
+            lines.append("")
+            lines.append(msg["content"])
+            lines.append("")
+        elif msg["role"] == "assistant":
+            lines.append(f"## 🤖 助手")
+            lines.append("")
+            if msg.get("thinking"):
+                lines.append("<details>")
+                lines.append("<summary>🤔 思考过程</summary>")
+                lines.append("")
+                lines.append(msg["thinking"])
+                lines.append("")
+                lines.append("</details>")
+                lines.append("")
+            lines.append(msg["content"])
+            lines.append("")
+        lines.append("---")
+        lines.append("")
+    return "\n".join(lines)
+
+# 导出当前对话为 JSON 格式
+def export_chat_as_json():
+    """将当前对话导出为格式化的 JSON 字符串"""
+    data = {
+        "id": st.session_state.get("current_chat_id", ""),
+        "title": st.session_state.get("chat_title", "新对话"),
+        "export_time": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "messages": st.session_state.messages
+    }
+    return json.dumps(data, ensure_ascii=False, indent=2)
+
 # 缓存历史对话列表，避免每次刷新重复读取全部文件
 @st.cache_data
 def get_history_chats():
@@ -187,6 +228,33 @@ with st.sidebar:
         if st.button(label, key=f"btn_{chat_id}", use_container_width=True):
             load_chat(item["path"])
             st.rerun()
+
+    st.divider()
+    st.subheader("导出对话")
+    
+    # 生成安全的文件名（移除非法字符）
+    safe_title = st.session_state.get("chat_title", "新对话")
+    safe_title = re.sub(r'[\\/*?:"<>|]', "_", safe_title)
+    
+    # Markdown 下载按钮
+    md_content = export_chat_as_markdown()
+    st.download_button(
+        label="📥 导出 Markdown",
+        data=md_content,
+        file_name=f"{safe_title}.md",
+        mime="text/markdown",
+        use_container_width=True
+    )
+    
+    # JSON 下载按钮
+    json_content = export_chat_as_json()
+    st.download_button(
+        label="📥 导出 JSON",
+        data=json_content,
+        file_name=f"{safe_title}.json",
+        mime="application/json",
+        use_container_width=True
+    )
 
 # === format_latex 性能优化：预编译正则表达式（避免每次调用重复编译） ===
 _RE_BEGIN_ENV = re.compile(r'\\begin\{(?:aligned|array|matrix|pmatrix|bmatrix|cases|align|gather|split)\}')

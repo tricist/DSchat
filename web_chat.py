@@ -6,6 +6,7 @@ import glob
 import hashlib
 import hmac
 import streamlit as st
+import streamlit.components.v1 as components
 from openai import OpenAI
 from dotenv import load_dotenv
 
@@ -75,12 +76,45 @@ def validate_auth_token(token: str) -> bool:
         return False
 
 
-def clear_auth_cookie():
-    """清除浏览器中的认证 Cookie"""
+def _set_persistent_cookie(token: str, max_age_days: int = None):
+    """通过 JS 注入带 max-age 的持久化 Cookie（解决 st.context.cookies 仅设会话 Cookie 的问题）。
+    
+    双重写入策略：
+    1. st.context.cookies → HTTP 响应头 Set-Cookie，立即可用（但无 max-age，关闭浏览器即失效）
+    2. 本函数 → JS document.cookie + max-age，持久化存储（跨浏览器会话）
+    """
+    if max_age_days is None:
+        max_age_days = TOKEN_MAX_AGE_DAYS
+    max_age_secs = max_age_days * 86400
+    try:
+        # HTTP 响应头设 Cookie（立即可用，确保 st.rerun() 后能读到）
+        st.context.cookies[COOKIE_NAME] = token
+    except Exception:
+        pass
+    # JS 设持久化 Cookie（max-age 属性跨浏览器会话）
+    components.html(f"""
+    <script>
+    document.cookie = "{COOKIE_NAME}={token}; max-age={max_age_secs}; path=/; SameSite=Lax";
+    </script>
+    """, height=0)
+
+
+def _delete_persistent_cookie():
+    """双重清除 Cookie：HTTP 响应头 + JS（max-age=0 立即过期）"""
     try:
         st.context.cookies[COOKIE_NAME] = ""
     except Exception:
         pass
+    components.html(f"""
+    <script>
+    document.cookie = "{COOKIE_NAME}=; max-age=0; path=/; SameSite=Lax";
+    </script>
+    """, height=0)
+
+
+def clear_auth_cookie():
+    """清除浏览器中的认证 Cookie（对外接口，内部调用双重清除）"""
+    _delete_persistent_cookie()
 
 # ==================== Cookie Token 认证 END ====================
 
@@ -225,10 +259,7 @@ def check_password():
             st.session_state.authenticated = True
             st.session_state.login_attempts = 0
             # 自动刷新 Token（每次访问延长有效期，活跃用户永不过期）
-            try:
-                st.context.cookies[COOKIE_NAME] = generate_auth_token()
-            except Exception:
-                pass
+            _set_persistent_cookie(generate_auth_token())
             st.rerun()
     
     # ★ 步骤 2：未认证 → 显示登录表单
@@ -253,12 +284,9 @@ def check_password():
             if pwd == CORRECT_PASSWORD:
                 st.session_state.authenticated = True
                 st.session_state.login_attempts = 0
-                # 勾选"记住我" → 写入持久 Cookie
+                # 勾选"记住我" → 双重写入持久 Cookie（HTTP 响应头 + JS max-age）
                 if remember:
-                    try:
-                        st.context.cookies[COOKIE_NAME] = generate_auth_token()
-                    except Exception:
-                        pass
+                    _set_persistent_cookie(generate_auth_token())
                 st.rerun()
             else:
                 st.session_state.login_attempts += 1

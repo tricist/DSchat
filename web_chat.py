@@ -3,8 +3,6 @@ import re
 import time
 import json
 import glob
-import hashlib
-import hmac
 import streamlit as st
 from openai import OpenAI
 from dotenv import load_dotenv
@@ -15,128 +13,6 @@ load_dotenv()
 # 创建历史对话存储目录
 CHATS_DIR = "chats"
 os.makedirs(CHATS_DIR, exist_ok=True)
-
-# ==================== Cookie Token 持久化认证 ====================
-# 方案：HMAC 签名 Token 存入浏览器 Cookie，支持"记住我"免密登录
-# 安全性：
-#   1. Token = 创建时间:过期时间:HMAC-SHA256(密码哈希+时间戳+密钥)
-#   2. 修改 ACCESS_PASSWORD 会使所有旧 Token 立即失效
-#   3. hmac.compare_digest 防止时序攻击
-#   4. Token 最长有效期由 TOKEN_MAX_AGE_DAYS 控制（默认 30 天）
-
-COOKIE_NAME = "deepseek_auth"
-TOKEN_MAX_AGE_DAYS = int(os.environ.get('TOKEN_MAX_AGE_DAYS', '30'))
-# COOKIE_SECRET 用于 HMAC 签名，默认由 ACCESS_PASSWORD 派生
-COOKIE_SECRET = os.environ.get(
-    'COOKIE_SECRET',
-    os.environ.get('ACCESS_PASSWORD', 'default-secret') + ':cookie-salt'
-)
-
-
-def _hash_password(password: str) -> str:
-    """对密码做 SHA-256 单向哈希，嵌入 Token 用于验证密码是否变更"""
-    return hashlib.sha256(password.encode('utf-8')).hexdigest()
-
-
-def generate_auth_token() -> str:
-    """生成签名认证 Token，格式: 创建时间戳:过期时间戳:HMAC签名"""
-    now = int(time.time())
-    expiry = now + TOKEN_MAX_AGE_DAYS * 86400
-    password_hash = _hash_password(os.environ.get('ACCESS_PASSWORD', '123456'))
-    message = f"{password_hash}:{expiry}:{now}"
-    signature = hmac.new(
-        COOKIE_SECRET.encode('utf-8'),
-        message.encode('utf-8'),
-        hashlib.sha256
-    ).hexdigest()
-    return f"{now}:{expiry}:{signature}"
-
-
-# Token 黑名单（服务端内存缓存，重启清空；用于实现可靠的"退出登录"）
-@st.cache_resource
-def _get_token_blacklist() -> set:
-    """返回全局 Token 黑名单集合。退出登录时加入，validate 时优先拒绝。"""
-    return set()
-
-
-def _invalidate_token(token: str):
-    """将指定 Token 加入黑名单（退出登录时调用）"""
-    if token:
-        _get_token_blacklist().add(token)
-
-
-def validate_auth_token(token: str) -> bool:
-    """验证 Token：检查黑名单 → 过期时间 → HMAC 签名完整性"""
-    # ★ 优先检查黑名单（退出登录的 Token 立即失效）
-    if token in _get_token_blacklist():
-        return False
-    try:
-        parts = token.split(':')
-        if len(parts) != 3:
-            return False
-        created, expiry, signature = parts
-        # 检查是否过期
-        if int(expiry) < time.time():
-            return False
-        # 重新计算签名并比对（hmac.compare_digest 防时序攻击）
-        password_hash = _hash_password(os.environ.get('ACCESS_PASSWORD', '123456'))
-        message = f"{password_hash}:{expiry}:{created}"
-        expected_sig = hmac.new(
-            COOKIE_SECRET.encode('utf-8'),
-            message.encode('utf-8'),
-            hashlib.sha256
-        ).hexdigest()
-        return hmac.compare_digest(signature, expected_sig)
-    except Exception:
-        return False
-
-
-def _set_persistent_cookie(token: str, max_age_days: int = None):
-    """双重写入持久化 Cookie：
-    1. st.context.cookies → HTTP 响应头 Set-Cookie（立即可用）
-    2. st.markdown <script> → 主页面 JS document.cookie + max-age（跨浏览器会话，移动端兼容）
-    
-    注意：使用 st.markdown 注入 <script> 而非 components.html（iframe），
-    因为移动端浏览器对 iframe 内 document.cookie 限制严格（ITP 等隐私策略）。
-    """
-    if max_age_days is None:
-        max_age_days = TOKEN_MAX_AGE_DAYS
-    max_age_secs = max_age_days * 86400
-    try:
-        # HTTP 响应头设 Cookie（立即可用，确保 st.rerun() 后能读到）
-        st.context.cookies[COOKIE_NAME] = token
-    except Exception:
-        pass
-    # 主页面 JS 设持久化 Cookie（max-age 跨浏览器会话，移动端可靠）
-    st.markdown(
-        f'<script>document.cookie="{COOKIE_NAME}={token};max-age={max_age_secs};path=/";</script>',
-        unsafe_allow_html=True
-    )
-
-
-def _delete_persistent_cookie():
-    """双重清除 Cookie：HTTP 响应头 + 主页面 JS（max-age=0 立即过期）"""
-    try:
-        st.context.cookies[COOKIE_NAME] = ""
-    except Exception:
-        pass
-    st.markdown(
-        f'<script>document.cookie="{COOKIE_NAME}=;max-age=0;path=/";</script>',
-        unsafe_allow_html=True
-    )
-
-
-def clear_auth_cookie():
-    """清除认证 Cookie 并将当前 Token 加入黑名单（彻底阻止自动登录）"""
-    # 先读取当前 Token 加入黑名单（关键：防止 Cookie 清除不彻底导致自动登回）
-    try:
-        current_token = st.context.cookies.get(COOKIE_NAME)
-        _invalidate_token(current_token or "")
-    except Exception:
-        pass
-    _delete_persistent_cookie()
-
-# ==================== Cookie Token 认证 END ====================
 
 # 设置页面标题
 st.set_page_config(page_title="DeepSeek", page_icon="🤖")
@@ -258,67 +134,6 @@ def get_history_chats():
             continue
     return res
 
-# 密码验证逻辑（支持 Cookie Token 自动登录 + "记住我"）
-def check_password():
-    CORRECT_PASSWORD = os.environ.get('ACCESS_PASSWORD', '123456')
-    
-    # 初始化 session state
-    if "authenticated" not in st.session_state:
-        st.session_state.authenticated = False
-    if "login_attempts" not in st.session_state:
-        st.session_state.login_attempts = 0
-
-    # ★ 步骤 1：Cookie Token 自动登录（仅在未认证时尝试）
-    if not st.session_state.authenticated:
-        try:
-            cookie_token = st.context.cookies.get(COOKIE_NAME)
-        except Exception:
-            cookie_token = None
-        
-        if cookie_token and validate_auth_token(cookie_token):
-            st.session_state.authenticated = True
-            st.session_state.login_attempts = 0
-            # 自动刷新 Token（每次访问延长有效期，活跃用户永不过期）
-            _set_persistent_cookie(generate_auth_token())
-            st.rerun()
-    
-    # ★ 步骤 2：未认证 → 显示登录表单
-    if not st.session_state.authenticated:
-        # 暴力破解保护：5 次错误后锁定
-        if st.session_state.login_attempts >= 5:
-            st.error("尝试次数过多，为了安全起见，已锁定登录。请重启服务或稍后再试。")
-            return False
-
-        st.warning("请输入访问密码以继续。")
-        
-        # 密码输入框 + "记住我"复选框同行布局
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            pwd = st.text_input("密码", type="password", key="pwd_input")
-        with col2:
-            st.write("")  # 垂直对齐占位
-            remember = st.checkbox("记住我", value=False, key="remember_checkbox",
-                                   help="勾选后 30 天内无需重复输入密码")
-        
-        if st.button("登录", use_container_width=True):
-            if pwd == CORRECT_PASSWORD:
-                st.session_state.authenticated = True
-                st.session_state.login_attempts = 0
-                # 勾选"记住我" → 双重写入持久 Cookie（HTTP 响应头 + JS max-age）
-                if remember:
-                    _set_persistent_cookie(generate_auth_token())
-                st.rerun()
-            else:
-                st.session_state.login_attempts += 1
-                # 时间惩罚，抵御脚本暴力破解
-                time.sleep(2)
-                st.error(f"密码错误！剩余尝试次数: {5 - st.session_state.login_attempts}")
-        return False
-    return True
-
-# 如果未通过验证，则停止向下执行后续的聊天代码
-if not check_password():
-    st.stop()
 
 # 初始化对话历史，存放在 Streamlit 的 session_state 中
 if "selected_role" not in st.session_state:
@@ -360,14 +175,6 @@ with st.sidebar:
     
     if st.button("➕ 新建对话", use_container_width=True, type="primary"):
         init_or_reset_chat()
-        st.rerun()
-    
-    # 退出登录按钮（黑名单 + Cookie 清除 + 延迟确保 JS 执行）
-    if st.button("🚪 退出登录", use_container_width=True):
-        clear_auth_cookie()
-        st.session_state.authenticated = False
-        st.session_state.login_attempts = 0
-        time.sleep(0.3)  # 给浏览器 300ms 执行 JS 清除持久化 Cookie
         st.rerun()
 
     st.divider()

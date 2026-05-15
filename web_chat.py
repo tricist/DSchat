@@ -436,3 +436,6 @@ if prompt := st.chat_input("请输入文本"):
     # 【性能优化关键】：AI 答复完之后，才合并进行一次“集中的保存”，绝不打断打字流
     save_current_chat() 
     get_history_chats.clear() # 清空侧边栏列表缓存，告知最新的一条有更新
+    
+    # 强制刷新页面，以确保侧边栏的历史记录列表和导出文件的内容能立即反映最新状态
+    st.rerun()

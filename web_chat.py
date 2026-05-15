@@ -255,21 +255,12 @@ _RE_DOLLAR_BLOCK = re.compile(r'\$\$(.+?)\$\$', re.DOTALL)
 @st.cache_data(show_spinner=False, max_entries=300, ttl=3600)
 def format_latex(text):
     r"""将模型输出中的 LaTeX 标识符标准化为 Streamlit (KaTeX) 可渲染的格式。
-    
-    处理三个主要问题：
-    1. 将 \(...\) 转换为 $...$（行内公式）
-    2. 将 \[...\] 转换为 $$...$$（块级公式）
-    3. 自动修复缺失的 \begin{aligned} 环境——当 $$...$$ 块内使用了 & 对齐符
-       但没有对齐环境包裹时，自动补全 \begin{aligned}...\end{aligned}
-    
-    性能优化：
-    - 预编译正则表达式（模块级常量），消除每次调用重复编译开销
-    - @st.cache_data 持久化缓存：页面刷新时相同历史消息直接命中缓存，跳过全部处理
-    - 快速路径：不含 & 符号时跳过昂贵的正则替换（覆盖 >95% 纯文本消息）
-    - 安全限制：跳过超长公式块（>50000 字符），防止极端输入导致灾难性回溯
     """
     if not text:
         return text
+    
+    # 清理 KaTeX 不支持在 aligned 块内使用的 \tag 标签
+    text = re.sub(r'\\tag\{.*?\}', '', text)
     
     # 临时保护 \\[ 和 \\] (通常用于矩阵或多行公式的换行)，避免被错误替换
     text = text.replace(r'\\[', '___TEMP_LBRACKET___')
@@ -285,26 +276,40 @@ def format_latex(text):
     text = text.replace('___TEMP_LBRACKET___', r'\\[')
     text = text.replace('___TEMP_RBRACKET___', r'\\]')
     
-    # ★ 自动修复：检测 $$...$$ 块内缺失对齐环境的 & 符号
-    # 快速路径：不含 & 的文本无需对齐修复，跳过昂贵的 re.sub 扫描
-    # 绝大多数聊天消息为纯文本，此优化可覆盖 95%+ 的渲染调用
+    # 修复未被包裹的独立 \begin{aligned} ... \end{aligned} (自动添加 $$)
+    # 使用非贪婪匹配找到一对 \begin{aligned}...\end{aligned}，如果前后没有 $$，则补上
+    def wrap_isolated_aligned(match):
+        block = match.group(0)
+        return f"\n$${block}$$\n"
+    text = re.sub(r'(?<!\$\$)\s*(\\begin\{aligned\}.+?\\end\{aligned\})\s*(?!\$\$)', wrap_isolated_aligned, text, flags=re.DOTALL)
+
+    # 自动修复：检测 $$...$$ 块内缺失对齐环境的 & 符号
     if '&' in text:
         def fix_missing_aligned(match):
-            r"""若 $$ 块内含 & 且缺少对齐环境，则自动包裹 \begin{aligned}...\end{aligned}"""
             content = match.group(1)
             # 安全限制：跳过超长公式块，防止极端输入导致灾难性回溯
             if len(content) > 50000:
                 return f'$${content}$$'
-            # 已有对齐环境（aligned, array, matrix, cases 等）则不处理
+            # 已有对齐环境则不处理
             if _RE_BEGIN_ENV.search(content):
                 return f'$${content}$$'
-            # 包含 & 对齐符但缺少环境 → 自动补全 aligned
-            # 若已有残留的 \end{aligned} 则移除（防止重复闭合）
-            content = _RE_END_ALIGNED.sub('', content)
-            return f'$$\\begin{{aligned}}\n{content}\n\\end{{aligned}}$$'
+            # 只有当包含 & 对齐符时，才自动补全 aligned 包裹
+            if '&' in content:
+                # 顺便清除可能残留的 \end{aligned} 杂乱闭合标签
+                content = _RE_END_ALIGNED.sub('', content)
+                return f'$$\\begin{{aligned}}\n{content}\n\\end{{aligned}}$$'
+            return f'$${content}$$'
         
         text = _RE_DOLLAR_BLOCK.sub(fix_missing_aligned, text)
     
+    # 清理那些没有 begin 但单独出现了 \end{aligned} 的无效残留导致报错的情况
+    def clean_orphaned_end(match):
+        content = match.group(1)
+        if '\\begin{aligned}' not in content and '\\end{aligned}' in content:
+            content = content.replace('\\end{aligned}', '')
+        return f'$${content}$$'
+    text = _RE_DOLLAR_BLOCK.sub(clean_orphaned_end, text)
+
     return text
 
 # 显示历史对话记录 (跳过系统提示词)

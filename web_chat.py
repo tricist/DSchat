@@ -196,25 +196,33 @@ with st.sidebar:
     st.divider()
     st.subheader("导出对话")
     
+    # === 优化计算开销：仅在消息数量或对话切换时，才重新生成导出字符串 ===
+    current_chat_id = st.session_state.get("current_chat_id", "default")
+    msg_count = len(st.session_state.messages)
+    export_sig = f"{current_chat_id}_{msg_count}"
+    
+    if st.session_state.get("export_sig") != export_sig:
+        st.session_state.md_content = export_chat_as_markdown()
+        st.session_state.json_content = export_chat_as_json()
+        st.session_state.export_sig = export_sig
+
     # 生成安全的文件名（移除非法字符）
     safe_title = st.session_state.get("chat_title", "新对话")
     safe_title = re.sub(r'[\\/*?:"<>|]', "_", safe_title)
     
     # Markdown 下载按钮
-    md_content = export_chat_as_markdown()
     st.download_button(
         label="📥 导出 Markdown",
-        data=md_content,
+        data=st.session_state.md_content,
         file_name=f"{safe_title}.md",
         mime="text/markdown",
         use_container_width=True
     )
     
     # JSON 下载按钮
-    json_content = export_chat_as_json()
     st.download_button(
         label="📥 导出 JSON",
-        data=json_content,
+        data=st.session_state.json_content,
         file_name=f"{safe_title}.json",
         mime="application/json",
         use_container_width=True

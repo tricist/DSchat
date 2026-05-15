@@ -1,6 +1,7 @@
 import os
 import re
 import time
+import uuid
 import json
 import glob
 import streamlit as st
@@ -41,8 +42,8 @@ def init_or_reset_chat():
     st.session_state.messages = [
         {"role": "system", "content": ROLES.get(role_name, ROLES["均衡默认"])}
     ]
-    # 生成一个新的时间戳作为对话ID
-    st.session_state.current_chat_id = str(int(time.time() * 1000))
+    # 生成一个新的时间戳和UUID作为唯一对话ID，避免多端并发时的冲突
+    st.session_state.current_chat_id = f"{int(time.time() * 1000)}_{uuid.uuid4().hex[:6]}"
     st.session_state.chat_title = "新对话"
 
 # 将当前对话保存到本地 JSON 文件
@@ -134,17 +135,21 @@ def export_chat_as_json():
 def get_history_chats():
     if not os.path.exists(CHATS_DIR):
         return []
-    files = glob.glob(os.path.join(CHATS_DIR, "*.json"))
-    files.sort(reverse=True)
+        
+    # 优化：使用 os.scandir 提升大量文件时的扫描和元数据读取性能
+    entries = [e for e in os.scandir(CHATS_DIR) if e.name.endswith('.json')]
+    # 根据文件名倒序排序（文件名本身是时间戳），取前5条
+    entries.sort(key=lambda e: e.name, reverse=True)
+    
     res = []
-    # 最多只读取最近 5 条，大幅提升侧边栏加载速度
-    for f in files[:5]:
+    # 读取最新的5条记录
+    for entry in entries[:5]:
         try:
-            with open(f, "r", encoding="utf-8") as file:
+            with open(entry.path, "r", encoding="utf-8") as file:
                 data = json.load(file)
-                res.append({"id": data.get("id"), "title": data.get("title", "未命名对话"), "path": f})
+                res.append({"id": data.get("id"), "title": data.get("title", "未命名对话"), "path": entry.path})
         except Exception as e:
-            print(f"解析历史记录出错 {f}: {e}")
+            print(f"解析历史记录出错 {entry.path}: {e}")
             continue
     return res
 

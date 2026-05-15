@@ -58,13 +58,27 @@ def save_current_chat():
                 break
 
     file_path = os.path.join(CHATS_DIR, f"{st.session_state.current_chat_id}.json")
+    tmp_path = file_path + ".tmp"
     data = {
         "id": st.session_state.current_chat_id,
         "title": st.session_state.chat_title,
         "messages": st.session_state.messages
     }
-    with open(file_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    
+    # 原子性保存：先写入临时文件，成功后再通过操作系统原子替换原文件
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.flush()  # 确保数据刷入系统缓存
+            os.fsync(f.fileno())  # 确保数据真正落盘
+        os.replace(tmp_path, file_path)
+    except Exception as e:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except:
+                pass
+        print(f"保存聊天记录失败: {e}")
 
 # 从本地 JSON 文件加载对话
 def load_chat(file_path):
@@ -329,7 +343,8 @@ if prompt := st.chat_input("请输入文本"):
         full_response = ""
         full_thinking = ""
         saved_thinking = ""  # 保存思考内容副本，避免被清空标记覆盖
-        last_update_time = 0
+        last_thinking_update_time = 0
+        last_response_update_time = 0
         
         # 准备 API 请求参数
         api_kwargs = {
@@ -353,16 +368,17 @@ if prompt := st.chat_input("请输入文本"):
                 reasoning = getattr(delta, 'reasoning_content', None)
                 if reasoning:
                     full_thinking += reasoning
-                    # 思考阶段：单独更新思考容器（内容较短，重绘开销极小）
-                    # 此阶段不触发回复容器更新，互不干扰
-                    thinking_html = (
-                        f'<div style="background:rgba(128,128,128,0.1);'
-                        f'border-left:4px solid rgba(128,128,128,0.35);'
-                        f'padding:10px 14px;border-radius:4px;margin-bottom:8px;'
-                        f'font-size:0.92em;line-height:1.6;">'
-                        f'🤔 <strong>思考中...</strong><br>{full_thinking}▌</div>'
-                    )
-                    thinking_placeholder.markdown(thinking_html, unsafe_allow_html=True)
+                    # 思考阶段：单独更新思考容器（内容较短，重绘开销极小）加入节流防止高频刷新卡死页面
+                    if current_time - last_thinking_update_time > 0.08:
+                        thinking_html = (
+                            f'<div style="background:rgba(128,128,128,0.1);'
+                            f'border-left:4px solid rgba(128,128,128,0.35);'
+                            f'padding:10px 14px;border-radius:4px;margin-bottom:8px;'
+                            f'font-size:0.92em;line-height:1.6;">'
+                            f'🤔 <strong>思考中...</strong><br>{full_thinking}▌</div>'
+                        )
+                        thinking_placeholder.markdown(thinking_html, unsafe_allow_html=True)
+                        last_thinking_update_time = current_time
                 
                 if delta.content is not None:
                     full_response += delta.content
@@ -385,13 +401,26 @@ if prompt := st.chat_input("请输入文本"):
                     # 彻底消除流式循环中每 60ms 对全文跑正则处理的 O(n²) 性能瓶颈。
                     # LaTeX 源码中的 $ 和 $$ 会以纯文本形式展示（类似 st.write_stream），
                     # 流式结束后统一调用 format_latex 一次性渲染完整公式，确保 KaTeX 不会因截断而失败。
-                    if current_time - last_update_time > 0.06:
+                    if current_time - last_response_update_time > 0.06:
                         response_placeholder.markdown(
                             full_response + "▌",
                             unsafe_allow_html=False
                         )
-                        last_update_time = current_time
+                        last_response_update_time = current_time
             
+            # 流式结束，确保最后没来得及渲染的部分被完整渲染
+            if full_thinking:
+                saved_thinking = full_thinking
+                thinking_html = (
+                    f'<div style="background:rgba(128,128,128,0.1);'
+                    f'border-left:4px solid rgba(128,128,128,0.35);'
+                    f'padding:8px 14px;border-radius:4px;margin-bottom:10px;'
+                    f'font-size:0.9em;line-height:1.6;">'
+                    f'<details open><summary>🤔 <strong>思考过程</strong></summary>'
+                    f'{saved_thinking}</details></div>'
+                )
+                thinking_placeholder.markdown(thinking_html, unsafe_allow_html=True)
+                
             # 流式结束，一次性调用 format_latex 渲染完整 LaTeX（去掉光标）
             response_placeholder.markdown(format_latex(full_response), unsafe_allow_html=False)
             

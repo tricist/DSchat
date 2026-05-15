@@ -80,6 +80,21 @@ def save_current_chat():
             except:
                 pass
         print(f"保存聊天记录失败: {e}")
+        
+    # --- 自动清理旧对话，防止文件数量爆炸 ---
+    try:
+        all_chats = glob.glob(os.path.join(CHATS_DIR, "*.json"))
+        if len(all_chats) > 100:
+            # 文件名是以时间戳开头的，所以直接按名称排序即可将最旧的排在前面
+            all_chats.sort()
+            files_to_delete = all_chats[:50]
+            for f in files_to_delete:
+                try:
+                    os.remove(f)
+                except:
+                    pass
+    except Exception as e:
+        print(f"清理旧记录失败: {e}")
 
 # 从本地 JSON 文件加载对话
 def load_chat(file_path):

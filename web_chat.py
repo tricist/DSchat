@@ -70,8 +70,6 @@ def save_current_chat():
     try:
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
-            f.flush()  # 确保数据刷入系统缓存
-            os.fsync(f.fileno())  # 确保数据真正落盘
         os.replace(tmp_path, file_path)
     except Exception as e:
         if os.path.exists(tmp_path):
@@ -267,7 +265,6 @@ _RE_BEGIN_ENV = re.compile(r'\\begin\{(?:aligned|array|matrix|pmatrix|bmatrix|ca
 _RE_END_ALIGNED = re.compile(r'\\end\{aligned\}')
 _RE_DOLLAR_BLOCK = re.compile(r'\$\$(.+?)\$\$', re.DOTALL)
 
-@st.cache_data(show_spinner=False, max_entries=300, ttl=3600)
 def format_latex(text):
     r"""将模型输出中的 LaTeX 标识符标准化为 Streamlit (KaTeX) 可渲染的格式。
     """
@@ -328,10 +325,16 @@ def format_latex(text):
     return text
 
 # 显示历史对话记录 (跳过系统提示词)
-for msg in st.session_state.messages:
-    if msg["role"] != "system":
-        with st.chat_message(msg["role"]):
-            # 如果消息包含思考过程，一并渲染
+# 页面性能优化：仅渲染最近的 40 条（约 20 轮）对话，防止超长对话卡死浏览器
+MAX_DISPLAY_MSGS = 40
+msgs_to_display = [m for m in st.session_state.messages if m["role"] != "system"]
+if len(msgs_to_display) > MAX_DISPLAY_MSGS:
+    st.info(f"🕸️ 为保证页面流畅，已折叠前期较早的 {len(msgs_to_display) - MAX_DISPLAY_MSGS} 条对话内容（大模型上下文及导出功能不受影响）。")
+    msgs_to_display = msgs_to_display[-MAX_DISPLAY_MSGS:]
+
+for msg in msgs_to_display:
+    with st.chat_message(msg["role"]):
+        # 如果消息包含思考过程，一并渲染
             if msg.get("thinking"):
                 thinking_html = (
                     f'<div style="background:rgba(128,128,128,0.1);border-left:4px solid rgba(128,128,128,0.35);'
@@ -426,7 +429,7 @@ if prompt := st.chat_input("请输入文本"):
                     # 彻底消除流式循环中每 60ms 对全文跑正则处理的 O(n²) 性能瓶颈。
                     # LaTeX 源码中的 $ 和 $$ 会以纯文本形式展示（类似 st.write_stream），
                     # 流式结束后统一调用 format_latex 一次性渲染完整公式，确保 KaTeX 不会因截断而失败。
-                    if current_time - last_response_update_time > 0.06:
+                    if current_time - last_response_update_time > 0.05:
                         response_placeholder.markdown(
                             full_response + "▌",
                             unsafe_allow_html=False

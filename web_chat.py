@@ -36,6 +36,22 @@ ROLES = {
     "数学大师": "你是一位极其严谨的理论数学家与受人尊敬的教授。请以极致的逻辑性和专业性回答问题。请严格遵循以下要求：\n1. 必须使用准确的 LaTeX 表达数学概念，行内公式严格使用 `$` 包裹，独立块级公式严格使用 `$$` 包裹。\n2. 对于计算或证明题，必须采取分步解析（Step-by-Step）的方式，写出清晰的演算过程。\n3. 在得出结论后，尽可能简要总结其背后的核心定理或数学直觉。\n4. 保持语言的学术性与严谨性。"
 }
 
+# --- 自动清理旧对话，防止文件数量爆炸 ---
+def cleanup_old_chats():
+    try:
+        all_chats = glob.glob(os.path.join(CHATS_DIR, "*.json"))
+        if len(all_chats) > 100:
+            # 文件名是以时间戳开头的，所以直接按名称排序即可将最旧的排在前面
+            all_chats.sort()
+            files_to_delete = all_chats[:50]
+            for f in files_to_delete:
+                try:
+                    os.remove(f)
+                except:
+                    pass
+    except Exception as e:
+        print(f"清理旧记录失败: {e}")
+
 # 定义一个初始化或重置对话的函数
 def init_or_reset_chat():
     role_name = st.session_state.get("selected_role", "均衡默认")
@@ -45,6 +61,7 @@ def init_or_reset_chat():
     # 生成一个新的时间戳和UUID作为唯一对话ID，避免多端并发时的冲突
     st.session_state.current_chat_id = f"{int(time.time() * 1000)}_{uuid.uuid4().hex[:6]}"
     st.session_state.chat_title = "新对话"
+    cleanup_old_chats()
 
 # 将当前对话保存到本地 JSON 文件
 def save_current_chat():
@@ -78,21 +95,6 @@ def save_current_chat():
             except:
                 pass
         print(f"保存聊天记录失败: {e}")
-        
-    # --- 自动清理旧对话，防止文件数量爆炸 ---
-    try:
-        all_chats = glob.glob(os.path.join(CHATS_DIR, "*.json"))
-        if len(all_chats) > 100:
-            # 文件名是以时间戳开头的，所以直接按名称排序即可将最旧的排在前面
-            all_chats.sort()
-            files_to_delete = all_chats[:50]
-            for f in files_to_delete:
-                try:
-                    os.remove(f)
-                except:
-                    pass
-    except Exception as e:
-        print(f"清理旧记录失败: {e}")
 
 # 从本地 JSON 文件加载对话
 def load_chat(file_path):

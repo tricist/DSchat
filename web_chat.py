@@ -12,20 +12,19 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # 初始化本地数据库
-DB_PATH = "chats.db"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.path.join(BASE_DIR, "chats.db")
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS chats (
-            id TEXT PRIMARY KEY,
-            title TEXT,
-            messages TEXT,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    conn.commit()
-    conn.close()
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS chats (
+                id TEXT PRIMARY KEY,
+                title TEXT,
+                messages TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
     
 init_db()
 
@@ -81,19 +80,17 @@ ROLES = {
 # --- 自动清理旧对话，防止数据库过大 ---
 def cleanup_old_chats():
     try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        # 仅保留最近更新的 100 条记录
-        cursor.execute('''
-            DELETE FROM chats 
-            WHERE id NOT IN (
-                SELECT id FROM chats 
-                ORDER BY updated_at DESC 
-                LIMIT 100
-            )
-        ''')
-        conn.commit()
-        conn.close()
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.cursor()
+            # 仅保留最近更新的 100 条记录
+            cursor.execute('''
+                DELETE FROM chats 
+                WHERE id NOT IN (
+                    SELECT id FROM chats 
+                    ORDER BY updated_at DESC 
+                    LIMIT 100
+                )
+            ''')
     except Exception as e:
         print(f"清理旧记录失败: {e}")
 
@@ -121,31 +118,28 @@ def save_current_chat():
                 break
 
     try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        messages_str = json.dumps(st.session_state.messages, ensure_ascii=False)
-        cursor.execute('''
-            INSERT OR REPLACE INTO chats (id, title, messages, updated_at) 
-            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-        ''', (st.session_state.current_chat_id, st.session_state.chat_title, messages_str))
-        conn.commit()
-        conn.close()
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.cursor()
+            messages_str = json.dumps(st.session_state.messages, ensure_ascii=False)
+            cursor.execute('''
+                INSERT OR REPLACE INTO chats (id, title, messages, updated_at) 
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+            ''', (st.session_state.current_chat_id, st.session_state.chat_title, messages_str))
     except Exception as e:
         print(f"保存聊天记录失败: {e}")
 
 # 从本地 SQLite 数据库加载对话
 def load_chat(chat_id):
     try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute('SELECT title, messages FROM chats WHERE id = ?', (chat_id,))
-        row = cursor.fetchone()
-        conn.close()
-        
-        if row:
-            st.session_state.chat_title = row[0]
-            st.session_state.messages = json.loads(row[1])
-            st.session_state.current_chat_id = chat_id
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT title, messages FROM chats WHERE id = ?', (chat_id,))
+            row = cursor.fetchone()
+            
+            if row:
+                st.session_state.chat_title = row[0]
+                st.session_state.messages = json.loads(row[1])
+                st.session_state.current_chat_id = chat_id
     except Exception as e:
         print(f"加载聊天记录失败: {e}")
 
@@ -194,12 +188,11 @@ def export_chat_as_json():
 @st.cache_data
 def get_history_chats():
     try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute('SELECT id, title FROM chats ORDER BY updated_at DESC LIMIT 5')
-        rows = cursor.fetchall()
-        conn.close()
-        return [{"id": row[0], "title": row[1]} for row in rows]
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT id, title FROM chats ORDER BY updated_at DESC LIMIT 5')
+            rows = cursor.fetchall()
+            return [{"id": row[0], "title": row[1]} for row in rows]
     except Exception as e:
         print(f"读取历史记录失败: {e}")
         return []
@@ -265,37 +258,39 @@ with st.sidebar:
     st.divider()
     st.subheader("导出对话")
     
-    # === 优化计算开销：仅在消息数量或对话切换时，才重新生成导出字符串 ===
     current_chat_id = st.session_state.get("current_chat_id", "default")
     msg_count = len(st.session_state.messages)
     export_sig = f"{current_chat_id}_{msg_count}"
     
-    if st.session_state.get("export_sig") != export_sig:
+    # 只有点击准备按钮后，才会进行耗时的文本转化
+    if st.button("📦 准备导出数据", use_container_width=True):
         st.session_state.md_content = export_chat_as_markdown()
         st.session_state.json_content = export_chat_as_json()
         st.session_state.export_sig = export_sig
 
-    # 生成安全的文件名（移除非法字符）
-    safe_title = st.session_state.get("chat_title", "新对话")
-    safe_title = re.sub(r'[\\/*?:"<>|]', "_", safe_title)
-    
-    # Markdown 下载按钮
-    st.download_button(
-        label="📥 导出 Markdown",
-        data=st.session_state.md_content,
-        file_name=f"{safe_title}.md",
-        mime="text/markdown",
-        use_container_width=True
-    )
-    
-    # JSON 下载按钮
-    st.download_button(
-        label="📥 导出 JSON",
-        data=st.session_state.json_content,
-        file_name=f"{safe_title}.json",
-        mime="application/json",
-        use_container_width=True
-    )
+    # 仅当准备好的数据和当前聊天状态一致时，才展示下载按钮
+    if st.session_state.get("export_sig") == export_sig:
+        # 生成安全的文件名（移除非法字符）
+        safe_title = st.session_state.get("chat_title", "新对话")
+        safe_title = re.sub(r'[\\/*?:"<>|]', "_", safe_title)
+        
+        # Markdown 下载按钮
+        st.download_button(
+            label="📥 取回 Markdown",
+            data=st.session_state.md_content,
+            file_name=f"{safe_title}.md",
+            mime="text/markdown",
+            use_container_width=True
+        )
+        
+        # JSON 下载按钮
+        st.download_button(
+            label="📥 取回 JSON",
+            data=st.session_state.json_content,
+            file_name=f"{safe_title}.json",
+            mime="application/json",
+            use_container_width=True
+        )
 
 # === format_latex 性能优化：预编译正则表达式（避免每次调用重复编译） ===
 _RE_BEGIN_ENV = re.compile(r'\\begin\{(?:aligned|array|matrix|pmatrix|bmatrix|cases|align|gather|split)\}')

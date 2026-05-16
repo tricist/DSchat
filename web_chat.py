@@ -3,7 +3,7 @@ import re
 import time
 import uuid
 import json
-import glob
+import sqlite3
 import streamlit as st
 from openai import OpenAI
 from dotenv import load_dotenv
@@ -11,9 +11,23 @@ from dotenv import load_dotenv
 # 加载环境变量
 load_dotenv()
 
-# 创建历史对话存储目录
-CHATS_DIR = "chats"
-os.makedirs(CHATS_DIR, exist_ok=True)
+# 初始化本地数据库
+DB_PATH = "chats.db"
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS chats (
+            id TEXT PRIMARY KEY,
+            title TEXT,
+            messages TEXT,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    conn.commit()
+    conn.close()
+    
+init_db()
 
 # 设置页面标题
 st.set_page_config(page_title="DeepSeek", page_icon="🤖")
@@ -36,19 +50,22 @@ ROLES = {
     "数学大师": "你是一位极其严谨的理论数学家与受人尊敬的教授。请以极致的逻辑性和专业性回答问题。请严格遵循以下要求：\n1. 必须使用准确的 LaTeX 表达数学概念，行内公式严格使用 `$` 包裹，独立块级公式严格使用 `$$` 包裹。\n2. 对于计算或证明题，必须采取分步解析（Step-by-Step）的方式，写出清晰的演算过程。\n3. 在得出结论后，尽可能简要总结其背后的核心定理或数学直觉。\n4. 保持语言的学术性与严谨性。"
 }
 
-# --- 自动清理旧对话，防止文件数量爆炸 ---
+# --- 自动清理旧对话，防止数据库过大 ---
 def cleanup_old_chats():
     try:
-        all_chats = glob.glob(os.path.join(CHATS_DIR, "*.json"))
-        if len(all_chats) > 100:
-            # 文件名是以时间戳开头的，所以直接按名称排序即可将最旧的排在前面
-            all_chats.sort()
-            files_to_delete = all_chats[:50]
-            for f in files_to_delete:
-                try:
-                    os.remove(f)
-                except:
-                    pass
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        # 仅保留最近更新的 100 条记录
+        cursor.execute('''
+            DELETE FROM chats 
+            WHERE id NOT IN (
+                SELECT id FROM chats 
+                ORDER BY updated_at DESC 
+                LIMIT 100
+            )
+        ''')
+        conn.commit()
+        conn.close()
     except Exception as e:
         print(f"清理旧记录失败: {e}")
 
@@ -63,7 +80,7 @@ def init_or_reset_chat():
     st.session_state.chat_title = "新对话"
     cleanup_old_chats()
 
-# 将当前对话保存到本地 JSON 文件
+# 将当前对话保存到本地 SQLite 数据库
 def save_current_chat():
     if "current_chat_id" not in st.session_state:
         return
@@ -75,34 +92,34 @@ def save_current_chat():
                 st.session_state.chat_title = msg["content"][:15] + ("..." if len(msg["content"])>15 else "")
                 break
 
-    file_path = os.path.join(CHATS_DIR, f"{st.session_state.current_chat_id}.json")
-    tmp_path = file_path + ".tmp"
-    data = {
-        "id": st.session_state.current_chat_id,
-        "title": st.session_state.chat_title,
-        "messages": st.session_state.messages
-    }
-    
-    # 原子性保存：先写入临时文件，成功后再通过操作系统原子替换原文件
     try:
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        os.replace(tmp_path, file_path)
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        messages_str = json.dumps(st.session_state.messages, ensure_ascii=False)
+        cursor.execute('''
+            INSERT OR REPLACE INTO chats (id, title, messages, updated_at) 
+            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+        ''', (st.session_state.current_chat_id, st.session_state.chat_title, messages_str))
+        conn.commit()
+        conn.close()
     except Exception as e:
-        if os.path.exists(tmp_path):
-            try:
-                os.remove(tmp_path)
-            except:
-                pass
         print(f"保存聊天记录失败: {e}")
 
-# 从本地 JSON 文件加载对话
-def load_chat(file_path):
-    with open(file_path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-        st.session_state.messages = data.get("messages", [])
-        st.session_state.current_chat_id = data.get("id")
-        st.session_state.chat_title = data.get("title", "未命名对话")
+# 从本地 SQLite 数据库加载对话
+def load_chat(chat_id):
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute('SELECT title, messages FROM chats WHERE id = ?', (chat_id,))
+        row = cursor.fetchone()
+        conn.close()
+        
+        if row:
+            st.session_state.chat_title = row[0]
+            st.session_state.messages = json.loads(row[1])
+            st.session_state.current_chat_id = chat_id
+    except Exception as e:
+        print(f"加载聊天记录失败: {e}")
 
 # 导出当前对话为 Markdown 格式
 def export_chat_as_markdown():
@@ -145,29 +162,19 @@ def export_chat_as_json():
     }
     return json.dumps(data, ensure_ascii=False, indent=2)
 
-# 缓存历史对话列表，避免每次刷新重复读取全部文件
+# 缓存历史对话列表，从数据库获取最新记录
 @st.cache_data
 def get_history_chats():
-    if not os.path.exists(CHATS_DIR):
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute('SELECT id, title FROM chats ORDER BY updated_at DESC LIMIT 5')
+        rows = cursor.fetchall()
+        conn.close()
+        return [{"id": row[0], "title": row[1]} for row in rows]
+    except Exception as e:
+        print(f"读取历史记录失败: {e}")
         return []
-        
-    # 优化：使用 os.scandir 提升大量文件时的扫描和元数据读取性能
-    entries = [e for e in os.scandir(CHATS_DIR) if e.name.endswith('.json')]
-    # 根据文件名倒序排序（文件名本身是时间戳），取前5条
-    entries.sort(key=lambda e: e.name, reverse=True)
-    
-    res = []
-    # 读取最新的5条记录
-    for entry in entries[:5]:
-        try:
-            with open(entry.path, "r", encoding="utf-8") as file:
-                data = json.load(file)
-                res.append({"id": data.get("id"), "title": data.get("title", "未命名对话"), "path": entry.path})
-        except Exception as e:
-            print(f"解析历史记录出错 {entry.path}: {e}")
-            continue
-    return res
-
 
 # 初始化对话历史，存放在 Streamlit 的 session_state 中
 if "selected_role" not in st.session_state:
@@ -224,7 +231,7 @@ with st.sidebar:
         
         # 单击历史文件将其加载到屏幕中央
         if st.button(label, key=f"btn_{chat_id}", use_container_width=True):
-            load_chat(item["path"])
+            load_chat(item["id"])
             st.rerun()
 
     st.divider()

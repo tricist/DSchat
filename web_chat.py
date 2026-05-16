@@ -11,9 +11,15 @@ from dotenv import load_dotenv
 # 加载环境变量
 load_dotenv()
 
+if not os.environ.get("DEEPSEEK_API_KEY"):
+    st.error("⚠️ 未检测到环境变量 `DEEPSEEK_API_KEY`，请检查 .env 文件。")
+    st.stop()
+
 # 初始化本地数据库
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "chats.db")
+
+@st.cache_resource
 def init_db():
     with sqlite3.connect(DB_PATH) as conn:
         cursor = conn.cursor()

@@ -33,6 +33,34 @@ init_db()
 st.set_page_config(page_title="DeepSeek", page_icon="🤖")
 st.title("DeepSeek Web 聊天助手")
 
+# 注入快捷键监听 (Ctrl+K / Cmd+K 新建对话)
+st.iframe(
+    """
+    <script>
+    const doc = window.parent.document;
+    if (!doc.getElementById("ctrl_k_shortcut")) {
+        const script = doc.createElement("script");
+        script.id = "ctrl_k_shortcut";
+        script.innerHTML = `
+            document.addEventListener('keydown', function(e) {
+                if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+                    e.preventDefault();
+                    const buttons = Array.from(document.querySelectorAll('button'));
+                    const newChatBtn = buttons.find(b => b.innerText.includes('新建对话'));
+                    if (newChatBtn) {
+                        newChatBtn.click();
+                    }
+                }
+            });
+        `;
+        doc.head.appendChild(script);
+    }
+    </script>
+    """,
+    height=1,
+    width=1,
+)
+
 # 初始化 OpenAI 客户端
 @st.cache_resource # 缓存客户端，避免每次刷新页面重新实例化
 def get_client():

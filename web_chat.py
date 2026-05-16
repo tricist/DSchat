@@ -22,6 +22,7 @@ DB_PATH = os.path.join(BASE_DIR, "chats.db")
 @st.cache_resource
 def init_db():
     with sqlite3.connect(DB_PATH) as conn:
+        conn.execute('PRAGMA journal_mode=WAL;')
         cursor = conn.cursor()
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS chats (
@@ -108,6 +109,7 @@ def init_or_reset_chat():
     ]
     # 生成一个新的时间戳和UUID作为唯一对话ID，避免多端并发时的冲突
     st.session_state.current_chat_id = f"{int(time.time() * 1000)}_{uuid.uuid4().hex[:6]}"
+    st.query_params["chat_id"] = st.session_state.current_chat_id
     st.session_state.chat_title = "新对话"
     cleanup_old_chats()
 
@@ -146,6 +148,7 @@ def load_chat(chat_id):
                 st.session_state.chat_title = row[0]
                 st.session_state.messages = json.loads(row[1])
                 st.session_state.current_chat_id = chat_id
+                st.query_params["chat_id"] = chat_id
     except Exception as e:
         print(f"加载聊天记录失败: {e}")
 
@@ -203,11 +206,17 @@ def get_history_chats():
         print(f"读取历史记录失败: {e}")
         return []
 
-# 初始化对话历史，存放在 Streamlit 的 session_state 中
+# === 初始化全局对话状态与路由 ===
 if "selected_role" not in st.session_state:
     st.session_state.selected_role = "均衡默认"
+
 if "messages" not in st.session_state:
-    init_or_reset_chat()
+    query_chat_id = st.query_params.get("chat_id")
+    if query_chat_id:
+        load_chat(query_chat_id)
+    # 如果 URL 获取失败或没带参数，则新建默认对话
+    if "messages" not in st.session_state:
+        init_or_reset_chat()
 
 # 在侧边栏添加新建对话按钮
 with st.sidebar:
@@ -273,6 +282,7 @@ with st.sidebar:
         st.session_state.md_content = export_chat_as_markdown()
         st.session_state.json_content = export_chat_as_json()
         st.session_state.export_sig = export_sig
+        st.toast("✅ 数据打包完成，可以点击下载！", icon="🎉")
 
     # 仅当准备好的数据和当前聊天状态一致时，才展示下载按钮
     if st.session_state.get("export_sig") == export_sig:

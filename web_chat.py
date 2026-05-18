@@ -337,11 +337,12 @@ def format_latex(text):
     text = text.replace('___TEMP_RBRACKET___', r'\\]')
     
     # 修复未被包裹的独立 \begin{aligned} ... \end{aligned} (自动添加 $$)
-    # 使用非贪婪匹配找到一对 \begin{aligned}...\end{aligned}，如果前后没有 $$，则补上
-    def wrap_isolated_aligned(match):
-        block = match.group(0)
-        return f"\n$${block}$$\n"
-    text = re.sub(r'(?<!\$\$)\s*(\\begin\{aligned\}.+?\\end\{aligned\})\s*(?!\$\$)', wrap_isolated_aligned, text, flags=re.DOTALL)
+    def wrap_aligned(match):
+        if match.group(1):
+            return match.group(1)
+        else:
+            return f"\n$${match.group(2)}$$\n"
+    text = re.sub(r'(\$\$.+?\$\$)|(\\begin\{aligned\}.+?\\end\{aligned\})', wrap_aligned, text, flags=re.DOTALL)
 
     # 自动修复：检测 $$...$$ 块内缺失对齐环境的 & 符号
     if '&' in text:

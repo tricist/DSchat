@@ -50,3 +50,33 @@ details.thinking-details[open] summary::before {
 .message-row:not(:has(.thinking-details)) img[alt*="admin"] {
     display: none !important;
 }
+
+/*
+ * 全局滚动条样式 — 半透明灰色，自动适配深色/浅色模式
+ * 滑块使用 rgba(128,128,128,0.3)，在任意背景上均自然融入
+ */
+
+/* Firefox */
+* {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(128, 128, 128, 0.3) transparent;
+}
+
+/* Chrome / Edge / Safari */
+::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+}
+
+::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+    background: rgba(128, 128, 128, 0.3);
+    border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: rgba(128, 128, 128, 0.5);
+}

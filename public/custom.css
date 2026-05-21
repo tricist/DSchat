@@ -1,0 +1,52 @@
+/**
+ * 思考过程区域样式 — 模拟原 cl.Step 的低调折叠效果
+ * 使用透明/半透明背景，自动适配深色/浅色模式
+ */
+details.thinking-details {
+    color: var(--text-muted, #888);
+    font-size: 0.85em;
+    background: transparent;
+    border: 1px solid rgb(128 128 128 / 0.15);
+    border-radius: 8px;
+    padding: 10px 14px;
+    margin-bottom: 4px;
+}
+
+details.thinking-details[open] {
+    padding-bottom: 14px;
+}
+
+details.thinking-details summary {
+    cursor: pointer;
+    font-weight: 600;
+    color: var(--text-muted, #888);
+    font-size: 0.9em;
+    user-select: none;
+    list-style: none;
+}
+
+details.thinking-details summary::-webkit-details-marker {
+    display: none;
+}
+
+details.thinking-details summary::before {
+    content: "▸ ";
+    display: inline-block;
+    transition: transform 0.15s ease;
+    font-size: 0.8em;
+}
+
+details.thinking-details[open] summary::before {
+    content: "▾ ";
+}
+
+/*
+ * 仅隐藏实际回复消息的头像，保留思考过程消息的头像以便定位对话
+ * 使用 :has() 选择器：不包含 .thinking-details 的助手消息才隐藏头像
+ */
+.message:not(:has(.thinking-details)) [class*="avatar"],
+[class*="message"]:not(:has(.thinking-details)) [class*="avatar"],
+.message-row:not(:has(.thinking-details)) img[alt*="Assistant"],
+.message-row:not(:has(.thinking-details)) img[alt*="admin"] {
+    display: none !important;
+}

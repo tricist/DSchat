@@ -289,14 +289,16 @@ async def main(message: cl.Message):
     enable_thinking = settings["enable_thinking"] if settings else True
     reasoning_effort = settings["reasoning_effort"] if settings else "high"
 
-    msg = cl.Message(content="")
-    await msg.send()
-    
-    thinking_step = None
+    # 使用两个独立 Message：思考消息用 <details> 实现折叠与视觉区分
+    res_msg = cl.Message(content="", author=" ")
+    thinking_msg = None
     if enable_thinking:
-        thinking_step = cl.Step(name="🤔 思考过程")
-        await thinking_step.send()
+        thinking_msg = cl.Message(
+            content='<details open class="thinking-details">\n<summary>🤔 思考过程</summary>\n\n'
+        )
 
+    thinking_sent = False
+    response_sent = False
     full_response = ""
     full_thinking = ""
 
@@ -318,22 +320,35 @@ async def main(message: cl.Message):
 
         async for chunk in stream:
             delta = chunk.choices[0].delta
-            
-            # 处理思考过程 (reasoning_content 专属于 deepseek-reasoner 等支持思考的模型)
+
+            # 处理思考过程
             reasoning = getattr(delta, 'reasoning_content', None)
-            if reasoning and thinking_step:
+            if reasoning and thinking_msg:
+                if not thinking_sent:
+                    await thinking_msg.send()  # 思考消息先发送 → 渲染在上方
+                    thinking_sent = True
                 full_thinking += reasoning
-                await thinking_step.stream_token(reasoning)
-                
+                await thinking_msg.stream_token(reasoning)
+
             # 处理普通回复内容
             if delta.content:
+                if not response_sent:
+                    await res_msg.send()  # 回复消息后发送 → 渲染在下方
+                    response_sent = True
                 full_response += delta.content
-                await msg.stream_token(delta.content)
+                await res_msg.stream_token(delta.content)
 
-        if thinking_step:
-            await thinking_step.update()
-            
-        await msg.update()
+        # 思考流结束后闭合 <details> 标签，恢复折叠功能
+        if thinking_sent:
+            thinking_msg.content += "\n</details>"
+            await thinking_msg.update()
+        if response_sent:
+            await res_msg.update()
+        elif not thinking_sent:
+            # 既无思考也无回复（极端情况），发送空提示
+            res_msg.content = "（模型未返回任何内容）"
+            await res_msg.send()
+            await res_msg.update()
 
         # 将助手回复加入历史记录
         messages.append({"role": "assistant", "content": full_response})

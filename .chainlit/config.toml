@@ -97,6 +97,9 @@ reaction_on_message_received = false
 # Name of the assistant.
 name = "Assistant"
 
+# 自定义 JavaScript 文件路径（相对于 public 目录）
+custom_js = "/public/custom.js"
+
 # default_theme = "dark"
 
 # Force a specific language for all users (e.g., "en-US", "he-IL", "fr-FR")

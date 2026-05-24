@@ -10,6 +10,10 @@ details.thinking-details {
     border-radius: 8px;
     padding: 10px 14px;
     margin-bottom: 4px;
+    box-sizing: border-box;
+    overflow-x: auto;
+    overflow-wrap: break-word;
+    word-break: break-word;
 }
 
 details.thinking-details[open] {
@@ -38,6 +42,30 @@ details.thinking-details summary::before {
 
 details.thinking-details[open] summary::before {
     content: "▾ ";
+}
+
+/*
+ * 防止思考内容水平溢出
+ * 代码块、长文本等内容可能超出矩形框架，产生水平滚动条
+ */
+
+/* 思考区域内的代码块：允许内部横向滚动，但禁止撑破父容器 */
+details.thinking-details pre {
+    max-width: 100%;
+    overflow-x: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+/* 思考区域内的行内代码：自动换行 */
+details.thinking-details code {
+    word-break: break-all;
+    overflow-wrap: anywhere;
+}
+
+/* 思考区域内的所有文本元素：限制最大宽度 */
+details.thinking-details * {
+    max-width: 100%;
 }
 
 /*
@@ -79,4 +107,47 @@ details.thinking-details[open] summary::before {
 
 ::-webkit-scrollbar-thumb:hover {
     background: rgba(128, 128, 128, 0.5);
+}
+
+/*
+ * ============================================================
+ * 双重滚动条修复
+ * ============================================================
+ */
+
+/* 1) 彻底禁止页面级滚动 — 这是消除双滚动条最关键的一步 */
+html, body {
+    overflow: hidden !important;
+    height: 100% !important;
+}
+
+/* 2) 消除 Chainlit ScrollContainer 外层 wrapper 的滚动条
+ *    ScrollContainer 源码中，外层 div（relative）和内层 div
+ *    都有 overflow-y-auto。利用 :has() 选择器精准定位：
+ *    "拥有 overflow-y-auto 且直接子元素也有 overflow-y-auto 的容器"
+ *    → 这就是外层 wrapper，不应滚动。*/
+[class*="overflow-y-auto"]:has(> [class*="overflow-y-auto"]) {
+    overflow: hidden !important;
+}
+
+/* 3) 消除 Page.tsx 中 flex-row overflow-auto 容器的滚动条 */
+[class*="flex-row"][class*="overflow-auto"] {
+    overflow: hidden !important;
+}
+
+/*
+ * 消息内容区域：限制宽度，防止水平溢出
+ */
+.message-content,
+[class*="message"] [class*="content"],
+.prose {
+    overflow-wrap: break-word;
+    word-break: break-word;
+    max-width: 100%;
+}
+
+/* 代码块和表格：限制最大宽度 */
+pre, table {
+    max-width: 100% !important;
+    overflow-x: auto !important;
 }

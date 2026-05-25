@@ -128,6 +128,29 @@ ROLES = {
     "数学大师": "你是严谨的数学家。用 LaTeX 表达数学：`$` 包裹行内公式，`$$` 包裹块级公式。`$$` 必须独占一行、前后换行，结束后空一行再写后续内容，禁止 `$` 与 `$$` 互相嵌套。分步演算，总结核心定理。"
 }
 
+# 默认设置
+DEFAULT_SETTINGS = {
+    "role": "均衡默认",
+    "model": "deepseek-v4-pro",
+    "enable_thinking": True,
+    "reasoning_effort": "high",
+}
+
+
+async def persist_settings(settings: dict):
+    """将当前设置持久化到线程 metadata 中。"""
+    try:
+        from chainlit.data import get_data_layer
+        dl = get_data_layer()
+        if dl and hasattr(dl, 'update_thread'):
+            thread_id = cl.context.session.thread_id
+            if thread_id:
+                # 嵌套保存在 "settings" 键下。
+                # 避免与 Chainlit 自动序列化的 user_session 在更新时产生浅拷贝合并冲突。
+                await dl.update_thread(thread_id=thread_id, metadata={"settings": settings})
+    except Exception:
+        pass  # 持久化失败不影响主流程
+
 
 def strip_thinking(content: str) -> str:
     """从消息内容中移除 <details> 思考块，返回纯净的回复文本。
@@ -179,6 +202,8 @@ async def start_chat():
     ).send()
 
     cl.user_session.set("settings", settings)
+    # 持久化设置到线程 metadata
+    await persist_settings(settings)
     
     # 初始化历史消息
     role_name = settings["role"] if settings else "均衡默认"
@@ -200,8 +225,7 @@ async def resume_chat(thread: cl.types.ThreadDict):
     )
     cl.user_session.set("client", client)
 
-    # 尝试从 thread metadata 恢复角色
-    role_name = "均衡默认"
+    # 尝试从 thread metadata 恢复所有设置
     thread_metadata = thread.get("metadata") or {}
     # metadata 可能是 JSON 字符串，需要解析
     if isinstance(thread_metadata, str):
@@ -209,8 +233,21 @@ async def resume_chat(thread: cl.types.ThreadDict):
             thread_metadata = json.loads(thread_metadata)
         except json.JSONDecodeError:
             thread_metadata = {}
-    if "role" in thread_metadata:
-        role_name = thread_metadata["role"]
+            
+    # 从 metadata 提取 settings（兼容当前嵌套结构和旧会的根结构）
+    saved_settings = thread_metadata.get("settings")
+    if not isinstance(saved_settings, dict):
+        saved_settings = thread_metadata
+
+    # 合并默认值与持久化的设置
+    settings_dict = {
+        **DEFAULT_SETTINGS,
+        **{k: v for k, v in saved_settings.items() if k in DEFAULT_SETTINGS},
+    }
+    role_name = settings_dict["role"]
+    model_name = settings_dict["model"]
+    enable_thinking = settings_dict["enable_thinking"]
+    reasoning_effort = settings_dict["reasoning_effort"]
 
     # 重建消息历史（从持久化的 steps 中提取对话记录）
     # 注意：assistant_message 的 parentId 指向 run step（非 None），
@@ -236,6 +273,8 @@ async def resume_chat(thread: cl.types.ThreadDict):
     cl.user_session.set("messages", messages)
 
     # 发送系统设置面板（恢复会话时也允许调整设置）
+    model_values = ["deepseek-v4-pro", "deepseek-v4-flash"]
+    effort_values = ["high", "max"]
     settings = await cl.ChatSettings(
         [
             cl.input_widget.Select(
@@ -247,19 +286,19 @@ async def resume_chat(thread: cl.types.ThreadDict):
             cl.input_widget.Select(
                 id="model",
                 label="选择模型",
-                values=["deepseek-v4-pro", "deepseek-v4-flash"],
-                initial_index=0,
+                values=model_values,
+                initial_index=model_values.index(model_name) if model_name in model_values else 0,
             ),
             cl.input_widget.Switch(
                 id="enable_thinking",
                 label="开启思考模式",
-                initial=True,
+                initial=enable_thinking,
             ),
             cl.input_widget.Select(
                 id="reasoning_effort",
                 label="选择思考强度",
-                values=["high", "max"],
-                initial_index=0,
+                values=effort_values,
+                initial_index=effort_values.index(reasoning_effort) if reasoning_effort in effort_values else 0,
             ),
         ]
     ).send()
@@ -270,6 +309,8 @@ async def resume_chat(thread: cl.types.ThreadDict):
 @cl.on_settings_update
 async def setup_agent(settings):
     cl.user_session.set("settings", settings)
+    # 持久化设置到线程 metadata
+    await persist_settings(settings)
     role_name = settings["role"]
     
     # 更新系统提示词

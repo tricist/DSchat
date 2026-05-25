@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import uuid
 import chainlit as cl
 from openai import AsyncOpenAI
@@ -127,6 +128,13 @@ ROLES = {
     "数学大师": "你是严谨的数学家。用 LaTeX 表达数学：`$` 包裹行内公式，`$$` 包裹块级公式。`$$` 必须独占一行、前后换行，结束后空一行再写后续内容，禁止 `$` 与 `$$` 互相嵌套。分步演算，总结核心定理。"
 }
 
+
+def strip_thinking(content: str) -> str:
+    """从消息内容中移除 <details> 思考块，返回纯净的回复文本。
+    用于从数据库恢复会话时，过滤掉思考 HTML 标记，只保留实际回复内容。"""
+    cleaned = re.sub(r'<details[^>]*>.*?</details>\s*', '', content, flags=re.DOTALL)
+    return cleaned.strip()
+
 @cl.on_chat_start
 async def start_chat():
     api_key = os.environ.get('DEEPSEEK_API_KEY')
@@ -205,25 +213,25 @@ async def resume_chat(thread: cl.types.ThreadDict):
         role_name = thread_metadata["role"]
 
     # 重建消息历史（从持久化的 steps 中提取对话记录）
+    # 注意：assistant_message 的 parentId 指向 run step（非 None），
+    # 因此不能按 parentId is None 过滤，否则助手回复会全部丢失。
     messages = [{"role": "system", "content": ROLES.get(role_name, ROLES["均衡默认"])}]
     
     for step in thread.get("steps", []):
-        # 确保 step 是字典类型
         if not isinstance(step, dict):
             continue
-        if step.get("parentId") is None:
-            step_type = step.get("type")
-            if step_type == "user_message":
-                # 用户消息内容在 input 字段中
-                content = step.get("input", "") or step.get("output", "")
-            elif step_type == "assistant_message":
-                # 助手回复内容在 output 字段中
-                content = step.get("output", "")
-            else:
-                continue
+        step_type = step.get("type")
+        if step_type == "user_message":
+            content = step.get("input", "") or step.get("output", "")
             if content and isinstance(content, str):
-                role = "user" if step_type == "user_message" else "assistant"
-                messages.append({"role": role, "content": content})
+                messages.append({"role": "user", "content": content})
+        elif step_type == "assistant_message":
+            content = step.get("output", "")
+            if content and isinstance(content, str):
+                # 移除思考 <details> 块，只保留纯净回复用于 API 上下文
+                content = strip_thinking(content)
+                if content:
+                    messages.append({"role": "assistant", "content": content})
     
     cl.user_session.set("messages", messages)
 
@@ -289,18 +297,13 @@ async def main(message: cl.Message):
     enable_thinking = settings["enable_thinking"] if settings else True
     reasoning_effort = settings["reasoning_effort"] if settings else "high"
 
-    # 使用两个独立 Message：思考消息用 <details> 实现折叠与视觉区分
-    res_msg = cl.Message(content="", author=" ")
-    thinking_msg = None
-    if enable_thinking:
-        thinking_msg = cl.Message(
-            content='<details open class="thinking-details">\n<summary>🤔 思考过程</summary>\n\n'
-        )
-
-    thinking_sent = False
-    response_sent = False
+    # 使用单个 Message，思考过程用 <details> 包裹在消息内部
+    # 这样每个对话轮次只产生一个 assistant step，确保数据库持久化与恢复正确
+    msg = cl.Message(content="")
+    msg_sent = False
+    thinking_started = False  # 是否已有实际思考内容流式输出
+    thinking_closed = False   # </details> 是否已闭合
     full_response = ""
-    full_thinking = ""
 
     # 准备 API 请求参数
     api_kwargs = {
@@ -323,34 +326,40 @@ async def main(message: cl.Message):
 
             # 处理思考过程
             reasoning = getattr(delta, 'reasoning_content', None)
-            if reasoning and thinking_msg:
-                if not thinking_sent:
-                    await thinking_msg.send()  # 思考消息先发送 → 渲染在上方
-                    thinking_sent = True
-                full_thinking += reasoning
-                await thinking_msg.stream_token(reasoning)
+            if reasoning:
+                if not msg_sent:
+                    # 首个思考 token：先写入 <details> 开头再发送消息
+                    msg.content = '<details open class="thinking-details">\n<summary>🤔 思考过程</summary>\n\n'
+                    await msg.send()
+                    msg_sent = True
+                    thinking_started = True
+                await msg.stream_token(reasoning)
 
             # 处理普通回复内容
             if delta.content:
-                if not response_sent:
-                    await res_msg.send()  # 回复消息后发送 → 渲染在下方
-                    response_sent = True
+                if thinking_started and not thinking_closed:
+                    # 思考结束 → 闭合 <details>，后续为正式回复
+                    await msg.stream_token('\n</details>\n\n')
+                    thinking_closed = True
+                if not msg_sent:
+                    await msg.send()
+                    msg_sent = True
                 full_response += delta.content
-                await res_msg.stream_token(delta.content)
+                await msg.stream_token(delta.content)
 
-        # 思考流结束后闭合 <details> 标签，恢复折叠功能
-        if thinking_sent:
-            thinking_msg.content += "\n</details>"
-            await thinking_msg.update()
-        if response_sent:
-            await res_msg.update()
-        elif not thinking_sent:
-            # 既无思考也无回复（极端情况），发送空提示
-            res_msg.content = "（模型未返回任何内容）"
-            await res_msg.send()
-            await res_msg.update()
+        # 确保 <details> 闭合（仅有思考、无实际回复内容时）
+        if thinking_started and not thinking_closed:
+            await msg.stream_token('\n</details>')
 
-        # 将助手回复加入历史记录
+        if msg_sent:
+            await msg.update()
+        else:
+            # 既无思考也无回复（极端情况）
+            msg.content = "（模型未返回任何内容）"
+            await msg.send()
+            await msg.update()
+
+        # 只将纯净回复（不含思考 HTML）加入历史，发送给 API 的上下文是干净的
         messages.append({"role": "assistant", "content": full_response})
         cl.user_session.set("messages", messages)
 

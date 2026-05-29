@@ -65,15 +65,17 @@ if not os.getenv("DATABASE_URL"):
             FOREIGN KEY (threadId) REFERENCES threads(id)
         )""")
         
-        # Chainlit 2.11.x 新增列，如果表已存在则补充
+        # Chainlit 2.11.x 及更高版本新增列的严谨迁移机制
+        # 使用 PRAGMA table_info 校验，避免 try-except 吞掉真实的 OperationalError
+        c.execute("PRAGMA table_info(steps)")
+        existing_columns = [row[1] for row in c.fetchall()]
+        
         for col, col_def in [
             ("defaultOpen", "INTEGER NOT NULL DEFAULT 1"),
             ("autoCollapse", "INTEGER NOT NULL DEFAULT 0"),
         ]:
-            try:
+            if col not in existing_columns:
                 c.execute(f"ALTER TABLE steps ADD COLUMN {col} {col_def}")
-            except sqlite3.OperationalError:
-                pass  # 列已存在
         
         c.execute("""CREATE TABLE IF NOT EXISTS feedbacks (
             id TEXT PRIMARY KEY,

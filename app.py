@@ -2,6 +2,7 @@ import os
 import json
 import re
 import uuid
+import asyncio
 import chainlit as cl
 from openai import AsyncOpenAI
 from dotenv import load_dotenv
@@ -136,6 +137,21 @@ DEFAULT_SETTINGS = {
     "reasoning_effort": "high",
 }
 
+# --- 单例/全局 API 客户端 ---
+_async_openai_client = None
+
+def get_openai_client():
+    """返回单次初始化的 AsyncOpenAI 客户端，避免重复创建引起资源浪费"""
+    global _async_openai_client
+    if _async_openai_client is None:
+        api_key = os.environ.get('DEEPSEEK_API_KEY')
+        if api_key:
+            _async_openai_client = AsyncOpenAI(
+                api_key=api_key,
+                base_url="https://api.deepseek.com"
+            )
+    return _async_openai_client
+
 
 async def persist_settings(settings: dict):
     """将当前设置持久化到线程 metadata 中。"""
@@ -160,17 +176,9 @@ def strip_thinking(content: str) -> str:
 
 @cl.on_chat_start
 async def start_chat():
-    api_key = os.environ.get('DEEPSEEK_API_KEY')
-    if not api_key:
+    if not get_openai_client():
         await cl.Message(content="⚠️ 未检测到环境变量 `DEEPSEEK_API_KEY`，请检查 .env 文件。").send()
         return
-
-    # 初始化 OpenAI 客户端
-    client = AsyncOpenAI(
-        api_key=api_key,
-        base_url="https://api.deepseek.com"
-    )
-    cl.user_session.set("client", client)
 
     # 发送系统设置面板
     settings = await cl.ChatSettings(
@@ -213,17 +221,9 @@ async def start_chat():
 @cl.on_chat_resume
 async def resume_chat(thread: cl.types.ThreadDict):
     """恢复历史会话 — 当用户在侧边栏点击历史对话时触发"""
-    api_key = os.environ.get('DEEPSEEK_API_KEY')
-    if not api_key:
+    if not get_openai_client():
         await cl.Message(content="⚠️ 未检测到环境变量 `DEEPSEEK_API_KEY`，请检查 .env 文件。").send()
         return
-
-    # 初始化 OpenAI 客户端
-    client = AsyncOpenAI(
-        api_key=api_key,
-        base_url="https://api.deepseek.com"
-    )
-    cl.user_session.set("client", client)
 
     # 尝试从 thread metadata 恢复所有设置
     thread_metadata = thread.get("metadata") or {}
@@ -323,7 +323,7 @@ async def setup_agent(settings):
 
 @cl.on_message
 async def main(message: cl.Message):
-    client = cl.user_session.get("client")
+    client = get_openai_client()
     settings = cl.user_session.get("settings")
     messages = cl.user_session.get("messages")
 
@@ -401,6 +401,21 @@ async def main(message: cl.Message):
             await msg.update()
 
         # 只将纯净回复（不含思考 HTML）加入历史，发送给 API 的上下文是干净的
+        messages.append({"role": "assistant", "content": full_response})
+        cl.user_session.set("messages", messages)
+
+    except asyncio.CancelledError:
+        # 处理用户主动打断（点击停止生成）将抛出 CancelledError 异常
+        if thinking_started and not thinking_closed:
+            await msg.stream_token('\n</details>\n\n> ⚠️ *已在此处停止思考并中断生成*\n')
+            thinking_closed = True
+        else:
+            await msg.stream_token('\n\n> ⚠️ *回答生成已中断*\n')
+        
+        if msg_sent:
+            await msg.update()
+        
+        # 将已生成的片段保存进历史记录，避免下次生成缺乏断点上下文
         messages.append({"role": "assistant", "content": full_response})
         cl.user_session.set("messages", messages)
 

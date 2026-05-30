@@ -1,5 +1,4 @@
 import os
-import json
 import re
 import asyncio
 import chainlit as cl
@@ -68,33 +67,14 @@ if not os.getenv("DATABASE_URL"):
             FOREIGN KEY (threadId) REFERENCES threads(id)
         )""")
         
-        # Chainlit 各版本新增列的严谨迁移机制
-        # 使用 PRAGMA table_info 校验，避免 try-except 吞掉真实的 OperationalError
-        c.execute("PRAGMA table_info(steps)")
-        existing_columns = [row[1] for row in c.fetchall()]
-        
-        for col, col_def in [
-            # Chainlit 2.1.0+ 新增列
-            ("command", "TEXT"),
-            # Chainlit 2.3.0+ 新增列
-            ("defaultOpen", "INTEGER NOT NULL DEFAULT 1"),
-            # Chainlit 2.11.x+ 新增列
-            ("autoCollapse", "INTEGER NOT NULL DEFAULT 0"),
-            # Chainlit 2.9.4+ 新增列（modes 多选器持久化）
-            ("modes", "TEXT"),
-            # SQLAlchemyDataLayer 标准 schema 列（禁止反馈 / 缩进层级）
-            ("disableFeedback", "INTEGER NOT NULL DEFAULT 0"),
-            ("indent", "INTEGER"),
-        ]:
-            if col not in existing_columns:
-                c.execute(f"ALTER TABLE steps ADD COLUMN {col} {col_def}")
-        
         c.execute("""CREATE TABLE IF NOT EXISTS feedbacks (
             id TEXT PRIMARY KEY,
             forId TEXT NOT NULL,
+            threadId TEXT NOT NULL,
             value INTEGER NOT NULL,
             comment TEXT,
-            FOREIGN KEY (forId) REFERENCES steps(id)
+            FOREIGN KEY (forId) REFERENCES steps(id),
+            FOREIGN KEY (threadId) REFERENCES threads(id)
         )""")
         
         c.execute("""CREATE TABLE IF NOT EXISTS elements (
@@ -117,6 +97,30 @@ if not os.getenv("DATABASE_URL"):
             FOREIGN KEY (threadId) REFERENCES threads(id),
             FOREIGN KEY (forId) REFERENCES steps(id)
         )""")
+        
+        # Chainlit 各版本新增列的严谨迁移机制
+        # 使用 PRAGMA table_info 校验，避免 try-except 吞掉真实的 OperationalError
+        # 迁移必须在 CREATE TABLE 之后执行，确保表已存在
+        
+        # --- steps 表迁移 ---
+        c.execute("PRAGMA table_info(steps)")
+        existing_columns = [row[1] for row in c.fetchall()]
+        for col, col_def in [
+            ("command", "TEXT"),                         # Chainlit 2.1.0+
+            ("defaultOpen", "INTEGER NOT NULL DEFAULT 1"),# Chainlit 2.3.0+
+            ("autoCollapse", "INTEGER NOT NULL DEFAULT 0"),# Chainlit 2.11.x+
+            ("modes", "TEXT"),                           # Chainlit 2.9.4+
+            ("disableFeedback", "INTEGER NOT NULL DEFAULT 0"),
+            ("indent", "INTEGER"),
+        ]:
+            if col not in existing_columns:
+                c.execute(f"ALTER TABLE steps ADD COLUMN {col} {col_def}")
+        
+        # --- feedbacks 表迁移（官方 schema 包含 threadId，旧表可能缺失） ---
+        c.execute("PRAGMA table_info(feedbacks)")
+        existing_fb_columns = [row[1] for row in c.fetchall()]
+        if "threadId" not in existing_fb_columns:
+            c.execute("ALTER TABLE feedbacks ADD COLUMN threadId TEXT")
         
         conn.commit()
         conn.close()
@@ -242,40 +246,26 @@ async def start_chat():
 
 @cl.on_chat_resume
 async def resume_chat(thread: cl.types.ThreadDict):
-    """恢复历史会话 — 当用户在侧边栏点击历史对话时触发"""
+    """恢复历史会话 — 当用户在侧边栏点击历史对话时触发
+    
+    Chainlit 的 on_chat_resume 自动完成两项工作：
+    1. 将持久化的 messages/elements（含 ChatSettings 面板）发送到 UI
+    2. 恢复 user_session（含 settings, system_prompt 等 JSON 可序列化字段）
+    因此无需手动解析 thread metadata 也无需重新发送 ChatSettings。
+    只需从数据层重建 message_history 以确保与数据库完全一致。
+    """
     if not get_openai_client():
         await cl.Message(content="⚠️ 未检测到环境变量 `DEEPSEEK_API_KEY`，请检查 .env 文件。").send()
         return
 
-    # 尝试从 thread metadata 恢复所有设置
-    thread_metadata = thread.get("metadata") or {}
-    # metadata 可能是 JSON 字符串，需要解析
-    if isinstance(thread_metadata, str):
-        try:
-            thread_metadata = json.loads(thread_metadata)
-        except json.JSONDecodeError:
-            thread_metadata = {}
-            
-    # 从 metadata 提取 settings（兼容当前嵌套结构和旧会话的根结构）
-    saved_settings = thread_metadata.get("settings")
-    if not isinstance(saved_settings, dict):
-        saved_settings = thread_metadata
-
-    # 合并默认值与持久化的设置
-    settings_dict = {
-        **DEFAULT_SETTINGS,
-        **{k: v for k, v in saved_settings.items() if k in DEFAULT_SETTINGS},
-    }
-    role_name = settings_dict["role"]
-    model_name = settings_dict["model"]
-    enable_thinking = settings_dict["enable_thinking"]
-    reasoning_effort = settings_dict["reasoning_effort"]
-
-    # 保存系统提示词
-    cl.user_session.set("system_prompt", ROLES.get(role_name, ROLES["均衡默认"]))
+    # user_session 已由 Chainlit 自动恢复，直接读取即可
+    settings = cl.user_session.get("settings") or DEFAULT_SETTINGS
+    role_name = settings.get("role", "均衡默认")
+    system_prompt = ROLES.get(role_name, ROLES["均衡默认"])
+    cl.user_session.set("system_prompt", system_prompt)
 
     # 从数据层一次性重建对话历史（此后在内存中维护，避免每次 on_message 都读库）
-    messages = [{"role": "system", "content": ROLES.get(role_name, ROLES["均衡默认"])}]
+    messages = [{"role": "system", "content": system_prompt}]
     try:
         from chainlit.data import get_data_layer
         dl = get_data_layer()
@@ -299,39 +289,6 @@ async def resume_chat(thread: cl.types.ThreadDict):
     except Exception:
         pass
     cl.user_session.set("message_history", messages)
-
-    # 发送系统设置面板（恢复会话时也允许调整设置）
-    model_values = ["deepseek-v4-pro", "deepseek-v4-flash"]
-    effort_values = ["high", "max"]
-    settings_values = await cl.ChatSettings(
-        [
-            cl.input_widget.Select(
-                id="role",
-                label="选择助手角色",
-                values=list(ROLES.keys()),
-                initial_index=list(ROLES.keys()).index(role_name) if role_name in ROLES else 0,
-            ),
-            cl.input_widget.Select(
-                id="model",
-                label="选择模型",
-                values=model_values,
-                initial_index=model_values.index(model_name) if model_name in model_values else 0,
-            ),
-            cl.input_widget.Switch(
-                id="enable_thinking",
-                label="开启思考模式",
-                initial=enable_thinking,
-            ),
-            cl.input_widget.Select(
-                id="reasoning_effort",
-                label="选择思考强度",
-                values=effort_values,
-                initial_index=effort_values.index(reasoning_effort) if reasoning_effort in effort_values else 0,
-            ),
-        ]
-    ).send()
-
-    cl.user_session.set("settings", settings_values)
 
 
 @cl.on_settings_update

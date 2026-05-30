@@ -244,58 +244,59 @@ async def start_chat():
     cl.user_session.set("message_history", [{"role": "system", "content": system_prompt}])
 
 
+async def _load_history_from_db(system_prompt: str) -> list:
+    """从数据层一次性加载完整对话历史。
+
+    仅在 resume 后首次 on_message 时惰性调用，避免阻塞 UI 恢复。
+    返回包含 system 消息在内的 OpenAI 格式消息列表。
+    """
+    messages = [{"role": "system", "content": system_prompt}]
+    try:
+        from chainlit.data import get_data_layer
+        dl = get_data_layer()
+        if dl and hasattr(dl, 'get_thread'):
+            thread_data = await dl.get_thread(cl.context.session.thread_id)
+            raw_steps = thread_data.get("steps", []) if thread_data else []
+            for step in raw_steps:
+                if not isinstance(step, dict):
+                    continue
+                step_type = step.get("type")
+                if step_type == "user_message":
+                    content = step.get("input", "") or step.get("output", "")
+                    if content and isinstance(content, str):
+                        messages.append({"role": "user", "content": content})
+                elif step_type == "assistant_message":
+                    content = step.get("output", "")
+                    if content and isinstance(content, str):
+                        content = strip_thinking(content)
+                        if content:
+                            messages.append({"role": "assistant", "content": content})
+    except Exception:
+        pass
+    return messages
+
+
 @cl.on_chat_resume
 async def resume_chat(thread: cl.types.ThreadDict):
     """恢复历史会话 — 当用户在侧边栏点击历史对话时触发
-    
-    Chainlit 的 on_chat_resume 自动完成两项工作：
-    1. 将持久化的 messages/elements（含 ChatSettings 面板）发送到 UI
-    2. 恢复 user_session（含 settings, system_prompt, message_history 等字段）
-    因此无需手动解析 thread metadata、无需重发 ChatSettings、也无需读库。
-    message_history 已在每次 on_message 结束时写入 user_session，直接复用即可。
+
+    Chainlit 的 on_chat_resume 自动完成：
+    1. 将持久化的 messages/elements（含 ChatSettings）发送到 UI
+    2. 恢复 user_session（含 settings, system_prompt）
+    因此这里只做轻量恢复。message_history 不在此刻加载，
+    而是在用户发送第一条消息时惰性从 DB 重建，确保 UI 秒开。
     """
     if not get_openai_client():
         await cl.Message(content="⚠️ 未检测到环境变量 `DEEPSEEK_API_KEY`，请检查 .env 文件。").send()
         return
 
-    # user_session 已由 Chainlit 自动恢复，直接读取即可
+    # user_session 已由 Chainlit 自动恢复，直接读取
     settings = cl.user_session.get("settings") or DEFAULT_SETTINGS
     role_name = settings.get("role", "均衡默认")
     system_prompt = ROLES.get(role_name, ROLES["均衡默认"])
     cl.user_session.set("system_prompt", system_prompt)
-
-    # 尝试从自动恢复的 user_session 获取 message_history
-    message_history = cl.user_session.get("message_history")
-    if not message_history:
-        # 旧会话（message_history 尚未写入 user_session 的）回退到数据层一次性重建
-        message_history = [{"role": "system", "content": system_prompt}]
-        try:
-            from chainlit.data import get_data_layer
-            dl = get_data_layer()
-            if dl and hasattr(dl, 'get_thread'):
-                thread_data = await dl.get_thread(cl.context.session.thread_id)
-                raw_steps = thread_data.get("steps", []) if thread_data else []
-                for step in raw_steps:
-                    if not isinstance(step, dict):
-                        continue
-                    step_type = step.get("type")
-                    if step_type == "user_message":
-                        content = step.get("input", "") or step.get("output", "")
-                        if content and isinstance(content, str):
-                            message_history.append({"role": "user", "content": content})
-                    elif step_type == "assistant_message":
-                        content = step.get("output", "")
-                        if content and isinstance(content, str):
-                            content = strip_thinking(content)
-                            if content:
-                                message_history.append({"role": "assistant", "content": content})
-        except Exception:
-            pass
-        cl.user_session.set("message_history", message_history)
-    else:
-        # 已有内存快照，确保 system 消息与当前角色一致
-        if message_history and message_history[0]["role"] == "system":
-            message_history[0]["content"] = system_prompt
+    # 标记 message_history 需惰性加载（None = 尚未从 DB 加载）
+    cl.user_session.set("message_history", None)
 
 
 @cl.on_settings_update
@@ -327,10 +328,12 @@ async def main(message: cl.Message):
     enable_thinking = settings["enable_thinking"] if settings else True
     reasoning_effort = settings["reasoning_effort"] if settings else "high"
 
-    # 从用户会话中获取对话历史（start_chat / resume_chat 中已初始化，纯内存读取）
-    message_history = cl.user_session.get("message_history") or [
-        {"role": "system", "content": system_prompt or ROLES["均衡默认"]}
-    ]
+    # 获取对话历史：新会话在 start_chat 中已初始化；恢复会话为 None（惰性加载）
+    message_history = cl.user_session.get("message_history")
+    if message_history is None:
+        # 惰性加载：仅在 resume 后首次发消息时从 DB 一次性重建历史
+        message_history = await _load_history_from_db(system_prompt or ROLES["均衡默认"])
+        cl.user_session.set("message_history", message_history)
     # 追加当前用户消息
     current_content = message.content or ""
     if current_content:

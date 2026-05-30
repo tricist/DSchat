@@ -1,7 +1,6 @@
 import os
 import json
 import re
-import uuid
 import asyncio
 import chainlit as cl
 from openai import AsyncOpenAI
@@ -141,10 +140,11 @@ DEFAULT_SETTINGS = {
 
 # --- 单例/全局 API 客户端 ---
 _async_openai_client = None
+_openai_instrumented = False
 
 def get_openai_client():
     """返回单次初始化的 AsyncOpenAI 客户端，避免重复创建引起资源浪费"""
-    global _async_openai_client
+    global _async_openai_client, _openai_instrumented
     if _async_openai_client is None:
         api_key = os.environ.get('DEEPSEEK_API_KEY')
         if api_key:
@@ -152,6 +152,10 @@ def get_openai_client():
                 api_key=api_key,
                 base_url="https://api.deepseek.com"
             )
+            # Chainlit 内置 OpenAI 调用追踪（暂不启用，如需 Prompt Playground 调试可取消注释）
+            # if not _openai_instrumented:
+            #     cl.instrument_openai()
+            #     _openai_instrumented = True
     return _async_openai_client
 
 
@@ -215,9 +219,9 @@ async def start_chat():
     # 持久化设置到线程 metadata
     await persist_settings(settings)
     
-    # 初始化历史消息
+    # 初始化系统提示词（对话历史由 Chainlit 的 cl.chat_context 自动管理）
     role_name = settings["role"] if settings else "均衡默认"
-    cl.user_session.set("messages", [{"role": "system", "content": ROLES.get(role_name, ROLES["均衡默认"])}])
+    cl.user_session.set("system_prompt", ROLES.get(role_name, ROLES["均衡默认"]))
 
 
 @cl.on_chat_resume
@@ -251,28 +255,9 @@ async def resume_chat(thread: cl.types.ThreadDict):
     enable_thinking = settings_dict["enable_thinking"]
     reasoning_effort = settings_dict["reasoning_effort"]
 
-    # 重建消息历史（从持久化的 steps 中提取对话记录）
-    # 注意：assistant_message 的 parentId 指向 run step（非 None），
-    # 因此不能按 parentId is None 过滤，否则助手回复会全部丢失。
-    messages = [{"role": "system", "content": ROLES.get(role_name, ROLES["均衡默认"])}]
-    
-    for step in thread.get("steps", []):
-        if not isinstance(step, dict):
-            continue
-        step_type = step.get("type")
-        if step_type == "user_message":
-            content = step.get("input", "") or step.get("output", "")
-            if content and isinstance(content, str):
-                messages.append({"role": "user", "content": content})
-        elif step_type == "assistant_message":
-            content = step.get("output", "")
-            if content and isinstance(content, str):
-                # 移除思考 <details> 块，只保留纯净回复用于 API 上下文
-                content = strip_thinking(content)
-                if content:
-                    messages.append({"role": "assistant", "content": content})
-    
-    cl.user_session.set("messages", messages)
+    # 对话历史由 Chainlit 的 cl.chat_context 自动从数据库恢复，无需手动重建。
+    # 只需保存系统提示词，后续在 main() 中动态拼接消息列表。
+    cl.user_session.set("system_prompt", ROLES.get(role_name, ROLES["均衡默认"]))
 
     # 发送系统设置面板（恢复会话时也允许调整设置）
     model_values = ["deepseek-v4-pro", "deepseek-v4-flash"]
@@ -313,28 +298,32 @@ async def setup_agent(settings):
     cl.user_session.set("settings", settings)
     # 持久化设置到线程 metadata
     await persist_settings(settings)
+    # 更新系统提示词（对话历史由 cl.chat_context 自动管理，无需手动维护）
     role_name = settings["role"]
-    
-    # 更新系统提示词
-    messages = cl.user_session.get("messages", [])
-    if messages and messages[0]["role"] == "system":
-        messages[0]["content"] = ROLES.get(role_name, ROLES["均衡默认"])
-    else:
-        messages.insert(0, {"role": "system", "content": ROLES.get(role_name, ROLES["均衡默认"])})
-    cl.user_session.set("messages", messages)
+    cl.user_session.set("system_prompt", ROLES.get(role_name, ROLES["均衡默认"]))
 
 @cl.on_message
 async def main(message: cl.Message):
     client = get_openai_client()
     settings = cl.user_session.get("settings")
-    messages = cl.user_session.get("messages")
+    system_prompt = cl.user_session.get("system_prompt")
 
     if not client:
         await cl.Message(content="⚠️ 客户端未初始化，请刷新页面重试。").send()
         return
 
-    # 更新用户消息
-    messages.append({"role": "user", "content": message.content})
+    # 使用 Chainlit 内置的 cl.chat_context 获取对话历史（OpenAI 格式）
+    # 无需手动维护 messages 列表，Chainlit 自动管理持久化与恢复
+    raw_context = cl.chat_context.to_openai()
+    messages = [{"role": "system", "content": system_prompt or ROLES["均衡默认"]}]
+    for m in raw_context:
+        if m["role"] == "assistant":
+            # 移除思考 <details> 块，保持 API 上下文的纯净
+            content = strip_thinking(m.get("content", ""))
+            if content:
+                messages.append({"role": "assistant", "content": content})
+        else:
+            messages.append({"role": m["role"], "content": m.get("content", "")})
 
     model = settings["model"] if settings else "deepseek-v4-pro"
     enable_thinking = settings["enable_thinking"] if settings else True
@@ -402,9 +391,7 @@ async def main(message: cl.Message):
             await msg.send()
             await msg.update()
 
-        # 只将纯净回复（不含思考 HTML）加入历史，发送给 API 的上下文是干净的
-        messages.append({"role": "assistant", "content": full_response})
-        cl.user_session.set("messages", messages)
+        # 对话历史已由 Chainlit 自动持久化（通过 msg.send/stream_token/update），无需手动保存
 
     except asyncio.CancelledError:
         # 处理用户主动打断（点击停止生成）将抛出 CancelledError 异常
@@ -416,11 +403,7 @@ async def main(message: cl.Message):
         
         if msg_sent:
             await msg.update()
-        
-        # 将已生成的片段保存进历史记录，避免下次生成缺乏断点上下文
-        messages.append({"role": "assistant", "content": full_response})
-        cl.user_session.set("messages", messages)
+        # 已生成的片段由 Chainlit 自动持久化到当前 step，下次对话自动恢复
 
     except Exception as e:
         await cl.Message(content=f"⚠️ API 请求失败: {str(e)}").send()
-        messages.pop() # 请求失败时移除最后一条用户消息，方便重试

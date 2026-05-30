@@ -199,8 +199,8 @@ async def start_chat():
         await cl.Message(content="⚠️ 未检测到环境变量 `DEEPSEEK_API_KEY`，请检查 .env 文件。").send()
         return
 
-    # 发送系统设置面板
-    settings = await cl.ChatSettings(
+    # 发送系统设置面板（.send() 返回设置值的 dict，非 ChatSettings 对象）
+    settings_values = await cl.ChatSettings(
         [
             cl.input_widget.Select(
                 id="role",
@@ -228,12 +228,12 @@ async def start_chat():
         ]
     ).send()
 
-    cl.user_session.set("settings", settings)
+    cl.user_session.set("settings", settings_values)
     # 持久化设置到线程 metadata
-    await persist_settings(settings)
+    await persist_settings(settings_values)
     
     # 初始化系统提示词（对话历史随后在 main 中从数据层 steps 动态构建）
-    role_name = settings["role"] if settings else "均衡默认"
+    role_name = settings_values["role"] if settings_values else "均衡默认"
     cl.user_session.set("system_prompt", ROLES.get(role_name, ROLES["均衡默认"]))
 
 
@@ -275,7 +275,7 @@ async def resume_chat(thread: cl.types.ThreadDict):
     # 发送系统设置面板（恢复会话时也允许调整设置）
     model_values = ["deepseek-v4-pro", "deepseek-v4-flash"]
     effort_values = ["high", "max"]
-    settings = await cl.ChatSettings(
+    settings_values = await cl.ChatSettings(
         [
             cl.input_widget.Select(
                 id="role",
@@ -303,7 +303,7 @@ async def resume_chat(thread: cl.types.ThreadDict):
         ]
     ).send()
 
-    cl.user_session.set("settings", settings)
+    cl.user_session.set("settings", settings_values)
 
 
 @cl.on_settings_update

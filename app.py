@@ -244,47 +244,11 @@ async def start_chat():
     cl.user_session.set("message_history", [{"role": "system", "content": system_prompt}])
 
 
-async def _load_history_from_db(system_prompt: str) -> list:
-    """从数据层一次性加载完整对话历史。
-
-    仅在 resume 后首次 on_message 时惰性调用，避免阻塞 UI 恢复。
-    返回包含 system 消息在内的 OpenAI 格式消息列表。
-    """
-    messages = [{"role": "system", "content": system_prompt}]
-    try:
-        from chainlit.data import get_data_layer
-        dl = get_data_layer()
-        if dl and hasattr(dl, 'get_thread'):
-            thread_data = await dl.get_thread(cl.context.session.thread_id)
-            raw_steps = thread_data.get("steps", []) if thread_data else []
-            for step in raw_steps:
-                if not isinstance(step, dict):
-                    continue
-                step_type = step.get("type")
-                if step_type == "user_message":
-                    content = step.get("input", "") or step.get("output", "")
-                    if content and isinstance(content, str):
-                        messages.append({"role": "user", "content": content})
-                elif step_type == "assistant_message":
-                    content = step.get("output", "")
-                    if content and isinstance(content, str):
-                        content = strip_thinking(content)
-                        if content:
-                            messages.append({"role": "assistant", "content": content})
-    except Exception:
-        pass
-    return messages
-
-
 @cl.on_chat_resume
 async def resume_chat(thread: cl.types.ThreadDict):
     """恢复历史会话 — 当用户在侧边栏点击历史对话时触发
 
-    Chainlit 的 on_chat_resume 自动完成：
-    1. 将持久化的 messages/elements（含 ChatSettings）发送到 UI
-    2. 恢复 user_session（含 settings, system_prompt）
-    因此这里只做轻量恢复。message_history 不在此刻加载，
-    而是在用户发送第一条消息时惰性从 DB 重建，确保 UI 秒开。
+    直接从入参 thread 中提取步骤，同步重构对话历史。
     """
     if not get_openai_client():
         await cl.Message(content="⚠️ 未检测到环境变量 `DEEPSEEK_API_KEY`，请检查 .env 文件。").send()
@@ -295,8 +259,26 @@ async def resume_chat(thread: cl.types.ThreadDict):
     role_name = settings.get("role", "均衡默认")
     system_prompt = ROLES.get(role_name, ROLES["均衡默认"])
     cl.user_session.set("system_prompt", system_prompt)
-    # 标记 message_history 需惰性加载（None = 尚未从 DB 加载）
-    cl.user_session.set("message_history", None)
+    
+    # 直接从入参 thread 重建 message_history
+    message_history = [{"role": "system", "content": system_prompt}]
+    for step in thread.get("steps", []):
+        if not isinstance(step, dict):
+            continue
+        step_type = step.get("type")
+        if step_type == "user_message":
+            content = step.get("input", "") or step.get("output", "")
+            if content and isinstance(content, str):
+                message_history.append({"role": "user", "content": content})
+        elif step_type == "assistant_message":
+            content = step.get("output", "")
+            if content and isinstance(content, str):
+                content = strip_thinking(content)
+                if content:
+                    message_history.append({"role": "assistant", "content": content})
+                    
+    # 保存重建后的历史到 session
+    cl.user_session.set("message_history", message_history)
 
 
 @cl.on_settings_update
@@ -328,11 +310,11 @@ async def main(message: cl.Message):
     enable_thinking = settings["enable_thinking"] if settings else True
     reasoning_effort = settings["reasoning_effort"] if settings else "high"
 
-    # 获取对话历史：新会话在 start_chat 中已初始化；恢复会话为 None（惰性加载）
+    # 获取对话历史：新会话在 start_chat 初始化，恢复会话在 resume_chat 初始化
     message_history = cl.user_session.get("message_history")
     if message_history is None:
-        # 惰性加载：仅在 resume 后首次发消息时从 DB 一次性重建历史
-        message_history = await _load_history_from_db(system_prompt or ROLES["均衡默认"])
+        # Fallback，仅针对异常分支
+        message_history = [{"role": "system", "content": system_prompt or ROLES["均衡默认"]}]
         cl.user_session.set("message_history", message_history)
     # 追加当前用户消息
     current_content = message.content or ""

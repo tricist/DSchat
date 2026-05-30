@@ -250,9 +250,9 @@ async def resume_chat(thread: cl.types.ThreadDict):
     
     Chainlit 的 on_chat_resume 自动完成两项工作：
     1. 将持久化的 messages/elements（含 ChatSettings 面板）发送到 UI
-    2. 恢复 user_session（含 settings, system_prompt 等 JSON 可序列化字段）
-    因此无需手动解析 thread metadata 也无需重新发送 ChatSettings。
-    只需从数据层重建 message_history 以确保与数据库完全一致。
+    2. 恢复 user_session（含 settings, system_prompt, message_history 等字段）
+    因此无需手动解析 thread metadata、无需重发 ChatSettings、也无需读库。
+    message_history 已在每次 on_message 结束时写入 user_session，直接复用即可。
     """
     if not get_openai_client():
         await cl.Message(content="⚠️ 未检测到环境变量 `DEEPSEEK_API_KEY`，请检查 .env 文件。").send()
@@ -264,31 +264,38 @@ async def resume_chat(thread: cl.types.ThreadDict):
     system_prompt = ROLES.get(role_name, ROLES["均衡默认"])
     cl.user_session.set("system_prompt", system_prompt)
 
-    # 从数据层一次性重建对话历史（此后在内存中维护，避免每次 on_message 都读库）
-    messages = [{"role": "system", "content": system_prompt}]
-    try:
-        from chainlit.data import get_data_layer
-        dl = get_data_layer()
-        if dl and hasattr(dl, 'get_thread'):
-            thread_data = await dl.get_thread(cl.context.session.thread_id)
-            raw_steps = thread_data.get("steps", []) if thread_data else []
-            for step in raw_steps:
-                if not isinstance(step, dict):
-                    continue
-                step_type = step.get("type")
-                if step_type == "user_message":
-                    content = step.get("input", "") or step.get("output", "")
-                    if content and isinstance(content, str):
-                        messages.append({"role": "user", "content": content})
-                elif step_type == "assistant_message":
-                    content = step.get("output", "")
-                    if content and isinstance(content, str):
-                        content = strip_thinking(content)
-                        if content:
-                            messages.append({"role": "assistant", "content": content})
-    except Exception:
-        pass
-    cl.user_session.set("message_history", messages)
+    # 尝试从自动恢复的 user_session 获取 message_history
+    message_history = cl.user_session.get("message_history")
+    if not message_history:
+        # 旧会话（message_history 尚未写入 user_session 的）回退到数据层一次性重建
+        message_history = [{"role": "system", "content": system_prompt}]
+        try:
+            from chainlit.data import get_data_layer
+            dl = get_data_layer()
+            if dl and hasattr(dl, 'get_thread'):
+                thread_data = await dl.get_thread(cl.context.session.thread_id)
+                raw_steps = thread_data.get("steps", []) if thread_data else []
+                for step in raw_steps:
+                    if not isinstance(step, dict):
+                        continue
+                    step_type = step.get("type")
+                    if step_type == "user_message":
+                        content = step.get("input", "") or step.get("output", "")
+                        if content and isinstance(content, str):
+                            message_history.append({"role": "user", "content": content})
+                    elif step_type == "assistant_message":
+                        content = step.get("output", "")
+                        if content and isinstance(content, str):
+                            content = strip_thinking(content)
+                            if content:
+                                message_history.append({"role": "assistant", "content": content})
+        except Exception:
+            pass
+        cl.user_session.set("message_history", message_history)
+    else:
+        # 已有内存快照，确保 system 消息与当前角色一致
+        if message_history and message_history[0]["role"] == "system":
+            message_history[0]["content"] = system_prompt
 
 
 @cl.on_settings_update

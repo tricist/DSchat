@@ -1,5 +1,4 @@
 import os
-import json
 import re
 import asyncio
 import chainlit as cl
@@ -68,33 +67,14 @@ if not os.getenv("DATABASE_URL"):
             FOREIGN KEY (threadId) REFERENCES threads(id)
         )""")
         
-        # Chainlit 各版本新增列的严谨迁移机制
-        # 使用 PRAGMA table_info 校验，避免 try-except 吞掉真实的 OperationalError
-        c.execute("PRAGMA table_info(steps)")
-        existing_columns = [row[1] for row in c.fetchall()]
-        
-        for col, col_def in [
-            # Chainlit 2.1.0+ 新增列
-            ("command", "TEXT"),
-            # Chainlit 2.3.0+ 新增列
-            ("defaultOpen", "INTEGER NOT NULL DEFAULT 1"),
-            # Chainlit 2.11.x+ 新增列
-            ("autoCollapse", "INTEGER NOT NULL DEFAULT 0"),
-            # Chainlit 2.9.4+ 新增列（modes 多选器持久化）
-            ("modes", "TEXT"),
-            # SQLAlchemyDataLayer 标准 schema 列（禁止反馈 / 缩进层级）
-            ("disableFeedback", "INTEGER NOT NULL DEFAULT 0"),
-            ("indent", "INTEGER"),
-        ]:
-            if col not in existing_columns:
-                c.execute(f"ALTER TABLE steps ADD COLUMN {col} {col_def}")
-        
         c.execute("""CREATE TABLE IF NOT EXISTS feedbacks (
             id TEXT PRIMARY KEY,
             forId TEXT NOT NULL,
+            threadId TEXT NOT NULL,
             value INTEGER NOT NULL,
             comment TEXT,
-            FOREIGN KEY (forId) REFERENCES steps(id)
+            FOREIGN KEY (forId) REFERENCES steps(id),
+            FOREIGN KEY (threadId) REFERENCES threads(id)
         )""")
         
         c.execute("""CREATE TABLE IF NOT EXISTS elements (
@@ -117,6 +97,30 @@ if not os.getenv("DATABASE_URL"):
             FOREIGN KEY (threadId) REFERENCES threads(id),
             FOREIGN KEY (forId) REFERENCES steps(id)
         )""")
+        
+        # Chainlit 各版本新增列的严谨迁移机制
+        # 使用 PRAGMA table_info 校验，避免 try-except 吞掉真实的 OperationalError
+        # 迁移必须在 CREATE TABLE 之后执行，确保表已存在
+        
+        # --- steps 表迁移 ---
+        c.execute("PRAGMA table_info(steps)")
+        existing_columns = [row[1] for row in c.fetchall()]
+        for col, col_def in [
+            ("command", "TEXT"),                         # Chainlit 2.1.0+
+            ("defaultOpen", "INTEGER NOT NULL DEFAULT 1"),# Chainlit 2.3.0+
+            ("autoCollapse", "INTEGER NOT NULL DEFAULT 0"),# Chainlit 2.11.x+
+            ("modes", "TEXT"),                           # Chainlit 2.9.4+
+            ("disableFeedback", "INTEGER NOT NULL DEFAULT 0"),
+            ("indent", "INTEGER"),
+        ]:
+            if col not in existing_columns:
+                c.execute(f"ALTER TABLE steps ADD COLUMN {col} {col_def}")
+        
+        # --- feedbacks 表迁移（官方 schema 包含 threadId，旧表可能缺失） ---
+        c.execute("PRAGMA table_info(feedbacks)")
+        existing_fb_columns = [row[1] for row in c.fetchall()]
+        if "threadId" not in existing_fb_columns:
+            c.execute("ALTER TABLE feedbacks ADD COLUMN threadId TEXT")
         
         conn.commit()
         conn.close()
@@ -232,78 +236,67 @@ async def start_chat():
     # 持久化设置到线程 metadata
     await persist_settings(settings_values)
     
-    # 初始化系统提示词（对话历史随后在 main 中从数据层 steps 动态构建）
+    # 初始化系统提示词
     role_name = settings_values["role"] if settings_values else "均衡默认"
-    cl.user_session.set("system_prompt", ROLES.get(role_name, ROLES["均衡默认"]))
+    system_prompt = ROLES.get(role_name, ROLES["均衡默认"])
+    cl.user_session.set("system_prompt", system_prompt)
+    # 初始化对话历史（仅含系统消息，后续每轮在 main 中基于内存追加，无需反复读库）
+    cl.user_session.set("message_history", [{"role": "system", "content": system_prompt}])
+
+
+async def _load_history_from_db(system_prompt: str) -> list:
+    """从数据层一次性加载完整对话历史。
+
+    仅在 resume 后首次 on_message 时惰性调用，避免阻塞 UI 恢复。
+    返回包含 system 消息在内的 OpenAI 格式消息列表。
+    """
+    messages = [{"role": "system", "content": system_prompt}]
+    try:
+        from chainlit.data import get_data_layer
+        dl = get_data_layer()
+        if dl and hasattr(dl, 'get_thread'):
+            thread_data = await dl.get_thread(cl.context.session.thread_id)
+            raw_steps = thread_data.get("steps", []) if thread_data else []
+            for step in raw_steps:
+                if not isinstance(step, dict):
+                    continue
+                step_type = step.get("type")
+                if step_type == "user_message":
+                    content = step.get("input", "") or step.get("output", "")
+                    if content and isinstance(content, str):
+                        messages.append({"role": "user", "content": content})
+                elif step_type == "assistant_message":
+                    content = step.get("output", "")
+                    if content and isinstance(content, str):
+                        content = strip_thinking(content)
+                        if content:
+                            messages.append({"role": "assistant", "content": content})
+    except Exception:
+        pass
+    return messages
 
 
 @cl.on_chat_resume
 async def resume_chat(thread: cl.types.ThreadDict):
-    """恢复历史会话 — 当用户在侧边栏点击历史对话时触发"""
+    """恢复历史会话 — 当用户在侧边栏点击历史对话时触发
+
+    Chainlit 的 on_chat_resume 自动完成：
+    1. 将持久化的 messages/elements（含 ChatSettings）发送到 UI
+    2. 恢复 user_session（含 settings, system_prompt）
+    因此这里只做轻量恢复。message_history 不在此刻加载，
+    而是在用户发送第一条消息时惰性从 DB 重建，确保 UI 秒开。
+    """
     if not get_openai_client():
         await cl.Message(content="⚠️ 未检测到环境变量 `DEEPSEEK_API_KEY`，请检查 .env 文件。").send()
         return
 
-    # 尝试从 thread metadata 恢复所有设置
-    thread_metadata = thread.get("metadata") or {}
-    # metadata 可能是 JSON 字符串，需要解析
-    if isinstance(thread_metadata, str):
-        try:
-            thread_metadata = json.loads(thread_metadata)
-        except json.JSONDecodeError:
-            thread_metadata = {}
-            
-    # 从 metadata 提取 settings（兼容当前嵌套结构和旧会话的根结构）
-    saved_settings = thread_metadata.get("settings")
-    if not isinstance(saved_settings, dict):
-        saved_settings = thread_metadata
-
-    # 合并默认值与持久化的设置
-    settings_dict = {
-        **DEFAULT_SETTINGS,
-        **{k: v for k, v in saved_settings.items() if k in DEFAULT_SETTINGS},
-    }
-    role_name = settings_dict["role"]
-    model_name = settings_dict["model"]
-    enable_thinking = settings_dict["enable_thinking"]
-    reasoning_effort = settings_dict["reasoning_effort"]
-
-    # 对话历史由 Chainlit 数据层自动持久化，main() 中从 steps 动态构建消息列表。
-    # 只需保存系统提示词，后续在 main() 中动态拼接。
-    cl.user_session.set("system_prompt", ROLES.get(role_name, ROLES["均衡默认"]))
-
-    # 发送系统设置面板（恢复会话时也允许调整设置）
-    model_values = ["deepseek-v4-pro", "deepseek-v4-flash"]
-    effort_values = ["high", "max"]
-    settings_values = await cl.ChatSettings(
-        [
-            cl.input_widget.Select(
-                id="role",
-                label="选择助手角色",
-                values=list(ROLES.keys()),
-                initial_index=list(ROLES.keys()).index(role_name) if role_name in ROLES else 0,
-            ),
-            cl.input_widget.Select(
-                id="model",
-                label="选择模型",
-                values=model_values,
-                initial_index=model_values.index(model_name) if model_name in model_values else 0,
-            ),
-            cl.input_widget.Switch(
-                id="enable_thinking",
-                label="开启思考模式",
-                initial=enable_thinking,
-            ),
-            cl.input_widget.Select(
-                id="reasoning_effort",
-                label="选择思考强度",
-                values=effort_values,
-                initial_index=effort_values.index(reasoning_effort) if reasoning_effort in effort_values else 0,
-            ),
-        ]
-    ).send()
-
-    cl.user_session.set("settings", settings_values)
+    # user_session 已由 Chainlit 自动恢复，直接读取
+    settings = cl.user_session.get("settings") or DEFAULT_SETTINGS
+    role_name = settings.get("role", "均衡默认")
+    system_prompt = ROLES.get(role_name, ROLES["均衡默认"])
+    cl.user_session.set("system_prompt", system_prompt)
+    # 标记 message_history 需惰性加载（None = 尚未从 DB 加载）
+    cl.user_session.set("message_history", None)
 
 
 @cl.on_settings_update
@@ -311,9 +304,15 @@ async def setup_agent(settings):
     cl.user_session.set("settings", settings)
     # 持久化设置到线程 metadata
     await persist_settings(settings)
-    # 更新系统提示词（对话历史从数据层 steps 动态构建，无需手动维护 messages 列表）
+    # 更新系统提示词，同步更新对话历史中的 system 消息
     role_name = settings["role"]
-    cl.user_session.set("system_prompt", ROLES.get(role_name, ROLES["均衡默认"]))
+    system_prompt = ROLES.get(role_name, ROLES["均衡默认"])
+    cl.user_session.set("system_prompt", system_prompt)
+    # 同步更新对话历史中的系统消息（新的角色设定对后续对话生效）
+    message_history = cl.user_session.get("message_history")
+    if message_history and message_history[0]["role"] == "system":
+        message_history[0]["content"] = system_prompt
+        cl.user_session.set("message_history", message_history)
 
 @cl.on_message
 async def main(message: cl.Message):
@@ -329,45 +328,16 @@ async def main(message: cl.Message):
     enable_thinking = settings["enable_thinking"] if settings else True
     reasoning_effort = settings["reasoning_effort"] if settings else "high"
 
-    # 从数据层获取对话历史（step 按时间排序，含 user_message 和 assistant_message）
-    messages = [{"role": "system", "content": system_prompt or ROLES["均衡默认"]}]
-    try:
-        from chainlit.data import get_data_layer
-        dl = get_data_layer()
-        if dl and hasattr(dl, 'get_thread'):
-            thread = await dl.get_thread(cl.context.session.thread_id)
-            raw_steps = thread.get("steps", []) if thread else []
-            for step in raw_steps:
-                if not isinstance(step, dict):
-                    continue
-                step_type = step.get("type")
-                if step_type == "user_message":
-                    content = step.get("input", "") or step.get("output", "")
-                    if content and isinstance(content, str):
-                        messages.append({"role": "user", "content": content})
-                elif step_type == "assistant_message":
-                    content = step.get("output", "")
-                    if content and isinstance(content, str):
-                        content = strip_thinking(content)
-                        if not content:
-                            continue
-                        # 普通对话无需回传 reasoning_content（API 会忽略，纯浪费 token）
-                        # 如需工具调用：从 step.metadata 取出 reasoning_content 加入 msg_dict
-                        messages.append({"role": "assistant", "content": content})
-    except Exception:
-        pass  # 数据层不可用时不影响主流程
-
-    # 将当前用户消息显式追加到 messages 末尾。
-    # Chainlit 的 @queue_until_user_message() 会导致当前 user_message 步骤
-    # 被延迟持久化，仅靠数据层读取会丢失本轮用户输入。
-    # 去重检查：若末条已是相同内容的 user 消息则跳过，避免重复拼接。
+    # 获取对话历史：新会话在 start_chat 中已初始化；恢复会话为 None（惰性加载）
+    message_history = cl.user_session.get("message_history")
+    if message_history is None:
+        # 惰性加载：仅在 resume 后首次发消息时从 DB 一次性重建历史
+        message_history = await _load_history_from_db(system_prompt or ROLES["均衡默认"])
+        cl.user_session.set("message_history", message_history)
+    # 追加当前用户消息
     current_content = message.content or ""
     if current_content:
-        last_msg = messages[-1] if messages else None
-        if last_msg and last_msg["role"] == "user" and last_msg["content"] == current_content:
-            pass  # 已在历史中，无需重复追加
-        else:
-            messages.append({"role": "user", "content": current_content})
+        message_history.append({"role": "user", "content": current_content})
 
     # 使用单个 Message，思考过程用 <details> 包裹在消息内部
     # 这样每个对话轮次只产生一个 assistant step，确保数据库持久化与恢复正确
@@ -380,7 +350,7 @@ async def main(message: cl.Message):
     # 准备 API 请求参数
     api_kwargs = {
         "model": model,
-        "messages": messages,
+        "messages": message_history,
         "stream": True,
     }
     if enable_thinking:
@@ -425,11 +395,17 @@ async def main(message: cl.Message):
 
         if msg_sent:
             await msg.update()
+            # 将助手回复（去除思考 HTML 块）追加到对话历史
+            clean_content = strip_thinking(msg.content)
+            if clean_content:
+                message_history.append({"role": "assistant", "content": clean_content})
         else:
             # 既无思考也无回复（极端情况）
             msg.content = "（模型未返回任何内容）"
             await msg.send()
             await msg.update()
+        # 持久化对话历史到用户会话
+        cl.user_session.set("message_history", message_history)
 
     except asyncio.CancelledError:
         # 处理用户主动打断（点击停止生成）将抛出 CancelledError 异常
@@ -441,6 +417,8 @@ async def main(message: cl.Message):
         
         if msg_sent:
             await msg.update()
+        # 中断时不追加助手回复到历史（仅保留用户消息，下一轮可继续）
+        cl.user_session.set("message_history", message_history)
 
     except Exception as e:
         await cl.Message(content=f"⚠️ API 请求失败: {str(e)}").send()

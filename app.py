@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 
 # 加载环境变量
 load_dotenv()
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # --- 数据持久化层与初始化配置 ---
 async def _init_db_schema_async() -> None:
@@ -349,7 +350,6 @@ async def main(message: cl.Message):
     msg_sent = False
     thinking_started = False  # 是否已有实际思考内容流式输出
     thinking_closed = False   # </details> 是否已闭合
-    response_chunks = []
 
     # 准备 API 请求参数
     api_kwargs = {
@@ -390,9 +390,8 @@ async def main(message: cl.Message):
                 if not msg_sent:
                     await msg.send()
                     msg_sent = True
-                response_chunks.append(delta.content)
                 await msg.stream_token(delta.content)
-
+                
         # 确保 <details> 闭合（仅有思考、无实际回复内容时）
         if thinking_started and not thinking_closed:
             await msg.stream_token('\n</details>')
@@ -423,4 +422,7 @@ async def main(message: cl.Message):
         # 由于 message_history 是内存引用，中断时不追加相当于未修改对象，同样无需 cl.user_session.set
 
     except Exception as e:
+        if current_content and message_history and message_history[-1]["role"] == "user":
+            message_history.pop()  # 撤销因为出错而未回复的用户消息
         await cl.Message(content=f"⚠️ API 请求失败: {str(e)}").send()
+        

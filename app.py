@@ -13,128 +13,140 @@ logger = logging.getLogger(__name__)
 # 加载环境变量
 load_dotenv()
 
-# --- SQLite 数据持久化配置 ---
+# --- 数据持久化层与初始化配置 ---
+async def _init_db_schema_async() -> None:
+    pass
+
 # 如果没有配置官方的 PostgreSQL DATABASE_URL，则使用本地 SQLite 数据库
 if not os.getenv("DATABASE_URL"):
-    import sqlite3
+    import aiosqlite
     from chainlit.data.sql_alchemy import SQLAlchemyDataLayer
 
-    # Chainlit 的 SQLAlchemyDataLayer 使用原生 SQL 而非 ORM，
-    # 因此需要在模块加载时手动创建所有必需的表。
-    def _init_sqlite_schema():
-        conn = sqlite3.connect("chainlit.db")
-        c = conn.cursor()
+    _sqlite_initialized = False
+    _sqlite_init_lock = None
+
+    async def _init_db_schema_async() -> None:
+        """使用异步方式懒加载数据库表，消除全局作用域的同步阻塞"""
+        global _sqlite_initialized, _sqlite_init_lock
+        if _sqlite_initialized:
+            return
         
-        # 优化：开启 WAL (Write-Ahead Logging) 模式，极大提升 SQLite 异步读写并发性能
-        # 防治基于 ASGI Web 框架多用户操作引发的 "database is locked" 异常
-        c.execute("PRAGMA journal_mode=WAL;")
-        c.execute("PRAGMA synchronous=NORMAL;")
-        
-        c.execute("""CREATE TABLE IF NOT EXISTS users (
-            id TEXT PRIMARY KEY,
-            identifier TEXT UNIQUE NOT NULL,
-            createdAt TEXT NOT NULL,
-            metadata TEXT
-        )""")
-        
-        c.execute("""CREATE TABLE IF NOT EXISTS threads (
-            id TEXT PRIMARY KEY,
-            createdAt TEXT,
-            name TEXT,
-            userId TEXT,
-            userIdentifier TEXT,
-            tags TEXT,
-            metadata TEXT,
-            FOREIGN KEY (userId) REFERENCES users(id)
-        )""")
-        
-        c.execute("""CREATE TABLE IF NOT EXISTS steps (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            type TEXT NOT NULL,
-            threadId TEXT NOT NULL,
-            parentId TEXT,
-            streaming INTEGER NOT NULL DEFAULT 0,
-            waitForAnswer INTEGER,
-            isError INTEGER,
-            metadata TEXT,
-            tags TEXT,
-            input TEXT,
-            output TEXT,
-            createdAt TEXT,
-            start TEXT,
-            end TEXT,
-            generation TEXT,
-            showInput TEXT,
-            language TEXT,
-            command TEXT,
-            defaultOpen INTEGER NOT NULL DEFAULT 1,
-            autoCollapse INTEGER NOT NULL DEFAULT 0,
-            disableFeedback INTEGER NOT NULL DEFAULT 0,
-            indent INTEGER,
-            modes TEXT,
-            FOREIGN KEY (threadId) REFERENCES threads(id)
-        )""")
-        
-        c.execute("""CREATE TABLE IF NOT EXISTS feedbacks (
-            id TEXT PRIMARY KEY,
-            forId TEXT NOT NULL,
-            threadId TEXT NOT NULL,
-            value INTEGER NOT NULL,
-            comment TEXT,
-            FOREIGN KEY (forId) REFERENCES steps(id),
-            FOREIGN KEY (threadId) REFERENCES threads(id)
-        )""")
-        
-        c.execute("""CREATE TABLE IF NOT EXISTS elements (
-            id TEXT PRIMARY KEY,
-            threadId TEXT NOT NULL,
-            type TEXT NOT NULL,
-            chainlitKey TEXT,
-            url TEXT,
-            objectKey TEXT,
-            name TEXT NOT NULL,
-            display TEXT NOT NULL,
-            size TEXT,
-            language TEXT,
-            page INTEGER,
-            autoPlay INTEGER,
-            playerConfig TEXT,
-            forId TEXT,
-            mime TEXT,
-            props TEXT,
-            FOREIGN KEY (threadId) REFERENCES threads(id),
-            FOREIGN KEY (forId) REFERENCES steps(id)
-        )""")
-        
-        # Chainlit 各版本新增列的严谨迁移机制
-        # 使用 PRAGMA table_info 校验，避免 try-except 吞掉真实的 OperationalError
-        # 迁移必须在 CREATE TABLE 之后执行，确保表已存在
-        
-        # --- steps 表迁移 ---
-        c.execute("PRAGMA table_info(steps)")
-        existing_columns = [row[1] for row in c.fetchall()]
-        for col, col_def in [
-            ("command", "TEXT"),                         # Chainlit 2.1.0+
-            ("defaultOpen", "INTEGER NOT NULL DEFAULT 1"),# Chainlit 2.3.0+
-            ("autoCollapse", "INTEGER NOT NULL DEFAULT 0"),# Chainlit 2.11.x+
-            ("modes", "TEXT"),                           # Chainlit 2.9.4+
-            ("disableFeedback", "INTEGER NOT NULL DEFAULT 0"),
-            ("indent", "INTEGER"),
-        ]:
-            if col not in existing_columns:
-                c.execute(f"ALTER TABLE steps ADD COLUMN {col} {col_def}")
-        
-        # --- feedbacks 表迁移（官方 schema 包含 threadId，旧表可能缺失） ---
-        c.execute("PRAGMA table_info(feedbacks)")
-        existing_fb_columns = [row[1] for row in c.fetchall()]
-        if "threadId" not in existing_fb_columns:
-            c.execute("ALTER TABLE feedbacks ADD COLUMN threadId TEXT")
-        
-        conn.commit()
-        conn.close()
-    
-    _init_sqlite_schema()
+        # 惰性初始化 Lock，确保在事件循环创建后实例化
+        if _sqlite_init_lock is None:
+            _sqlite_init_lock = asyncio.Lock()
+            
+        async with _sqlite_init_lock:
+            if _sqlite_initialized:
+                return
+            
+            async with aiosqlite.connect("chainlit.db") as conn:
+                # 优化：开启 WAL (Write-Ahead Logging) 模式，极大提升 SQLite 异步读写并发性能
+                await conn.execute("PRAGMA journal_mode=WAL;")
+                await conn.execute("PRAGMA synchronous=NORMAL;")
+                
+                await conn.execute("""CREATE TABLE IF NOT EXISTS users (
+                    id TEXT PRIMARY KEY,
+                    identifier TEXT UNIQUE NOT NULL,
+                    createdAt TEXT NOT NULL,
+                    metadata TEXT
+                )""")
+                
+                await conn.execute("""CREATE TABLE IF NOT EXISTS threads (
+                    id TEXT PRIMARY KEY,
+                    createdAt TEXT,
+                    name TEXT,
+                    userId TEXT,
+                    userIdentifier TEXT,
+                    tags TEXT,
+                    metadata TEXT,
+                    FOREIGN KEY (userId) REFERENCES users(id)
+                )""")
+                
+                await conn.execute("""CREATE TABLE IF NOT EXISTS steps (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    type TEXT NOT NULL,
+                    threadId TEXT NOT NULL,
+                    parentId TEXT,
+                    streaming INTEGER NOT NULL DEFAULT 0,
+                    waitForAnswer INTEGER,
+                    isError INTEGER,
+                    metadata TEXT,
+                    tags TEXT,
+                    input TEXT,
+                    output TEXT,
+                    createdAt TEXT,
+                    start TEXT,
+                    end TEXT,
+                    generation TEXT,
+                    showInput TEXT,
+                    language TEXT,
+                    command TEXT,
+                    defaultOpen INTEGER NOT NULL DEFAULT 1,
+                    autoCollapse INTEGER NOT NULL DEFAULT 0,
+                    disableFeedback INTEGER NOT NULL DEFAULT 0,
+                    indent INTEGER,
+                    modes TEXT,
+                    FOREIGN KEY (threadId) REFERENCES threads(id)
+                )""")
+                
+                await conn.execute("""CREATE TABLE IF NOT EXISTS feedbacks (
+                    id TEXT PRIMARY KEY,
+                    forId TEXT NOT NULL,
+                    threadId TEXT NOT NULL,
+                    value INTEGER NOT NULL,
+                    comment TEXT,
+                    FOREIGN KEY (forId) REFERENCES steps(id),
+                    FOREIGN KEY (threadId) REFERENCES threads(id)
+                )""")
+                
+                await conn.execute("""CREATE TABLE IF NOT EXISTS elements (
+                    id TEXT PRIMARY KEY,
+                    threadId TEXT NOT NULL,
+                    type TEXT NOT NULL,
+                    chainlitKey TEXT,
+                    url TEXT,
+                    objectKey TEXT,
+                    name TEXT NOT NULL,
+                    display TEXT NOT NULL,
+                    size TEXT,
+                    language TEXT,
+                    page INTEGER,
+                    autoPlay INTEGER,
+                    playerConfig TEXT,
+                    forId TEXT,
+                    mime TEXT,
+                    props TEXT,
+                    FOREIGN KEY (threadId) REFERENCES threads(id),
+                    FOREIGN KEY (forId) REFERENCES steps(id)
+                )""")
+                
+                # --- steps 表迁移 ---
+                async with conn.execute("PRAGMA table_info(steps)") as cursor:
+                    rows = await cursor.fetchall()
+                    existing_columns = [row[1] for row in rows]
+                    
+                for col, col_def in [
+                    ("command", "TEXT"),                         
+                    ("defaultOpen", "INTEGER NOT NULL DEFAULT 1"),
+                    ("autoCollapse", "INTEGER NOT NULL DEFAULT 0"),
+                    ("modes", "TEXT"),                           
+                    ("disableFeedback", "INTEGER NOT NULL DEFAULT 0"),
+                    ("indent", "INTEGER"),
+                ]:
+                    if col not in existing_columns:
+                        await conn.execute(f"ALTER TABLE steps ADD COLUMN {col} {col_def}")
+                
+                # --- feedbacks 表迁移代码 ---
+                async with conn.execute("PRAGMA table_info(feedbacks)") as cursor:
+                    rows = await cursor.fetchall()
+                    existing_fb_columns = [row[1] for row in rows]
+                    
+                if "threadId" not in existing_fb_columns:
+                    await conn.execute("ALTER TABLE feedbacks ADD COLUMN threadId TEXT")
+                
+                await conn.commit()
+            _sqlite_initialized = True
 
     # 使用 @cl.data_layer 装饰器注册数据层（必须用装饰器，直接赋值无效）
     @cl.data_layer
@@ -143,7 +155,8 @@ if not os.getenv("DATABASE_URL"):
 
 # --- 密码认证（历史会话功能的前提） ---
 @cl.password_auth_callback
-def auth_callback(username: str, password: str) -> Optional[cl.User]:
+async def auth_callback(username: str, password: str) -> Optional[cl.User]:
+    await _init_db_schema_async()
     # 在此处可对接自己的用户数据库，以下为演示账号
     if username == "admin" and password == "admin":
         return cl.User(identifier="admin", metadata={"role": "admin"})
@@ -205,6 +218,7 @@ def strip_thinking(content: str) -> str:
 
 @cl.on_chat_start
 async def start_chat():
+    await _init_db_schema_async()
     if not openai_client:
         await cl.Message(content="⚠️ 未检测到环境变量 `DEEPSEEK_API_KEY`，请检查 .env 文件。").send()
         return
@@ -256,6 +270,7 @@ async def resume_chat(thread: cl.types.ThreadDict):
 
     直接从入参 thread 中提取步骤，同步重构对话历史。
     """
+    await _init_db_schema_async()
     if not openai_client:
         await cl.Message(content="⚠️ 未检测到环境变量 `DEEPSEEK_API_KEY`，请检查 .env 文件。").send()
         return

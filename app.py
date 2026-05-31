@@ -155,25 +155,17 @@ DEFAULT_SETTINGS = {
     "reasoning_effort": "high",
 }
 
-# --- 单例/全局 API 客户端 ---
-_async_openai_client = None
-_openai_instrumented = False
+# --- 全局 API 客户端 ---
+# AsyncOpenAI 原生协程安全并自带连接池，直接全局实例化即可
+api_key = os.environ.get('DEEPSEEK_API_KEY')
+openai_client = AsyncOpenAI(
+    api_key=api_key,
+    base_url="https://api.deepseek.com"
+) if api_key else None
 
-def get_openai_client():
-    """返回单次初始化的 AsyncOpenAI 客户端，避免重复创建引起资源浪费"""
-    global _async_openai_client, _openai_instrumented
-    if _async_openai_client is None:
-        api_key = os.environ.get('DEEPSEEK_API_KEY')
-        if api_key:
-            _async_openai_client = AsyncOpenAI(
-                api_key=api_key,
-                base_url="https://api.deepseek.com"
-            )
-            # Chainlit 内置 OpenAI 调用追踪（暂不启用，如需 Prompt Playground 调试可取消注释）
-            # if not _openai_instrumented:
-            #     cl.instrument_openai()
-            #     _openai_instrumented = True
-    return _async_openai_client
+# 如需使用 Prompt Playground 调试，可取消此行注释以追踪 OpenAI 调用
+# if openai_client:
+#     cl.instrument_openai()
 
 
 async def persist_settings(settings: dict):
@@ -199,7 +191,7 @@ def strip_thinking(content: str) -> str:
 
 @cl.on_chat_start
 async def start_chat():
-    if not get_openai_client():
+    if not openai_client:
         await cl.Message(content="⚠️ 未检测到环境变量 `DEEPSEEK_API_KEY`，请检查 .env 文件。").send()
         return
 
@@ -250,7 +242,7 @@ async def resume_chat(thread: cl.types.ThreadDict):
 
     直接从入参 thread 中提取步骤，同步重构对话历史。
     """
-    if not get_openai_client():
+    if not openai_client:
         await cl.Message(content="⚠️ 未检测到环境变量 `DEEPSEEK_API_KEY`，请检查 .env 文件。").send()
         return
 
@@ -298,7 +290,7 @@ async def setup_agent(settings):
 
 @cl.on_message
 async def main(message: cl.Message):
-    client = get_openai_client()
+    client = openai_client
     settings = cl.user_session.get("settings")
     system_prompt = cl.user_session.get("system_prompt")
 

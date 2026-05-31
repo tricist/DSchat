@@ -2,6 +2,7 @@ import os
 import re
 import asyncio
 import logging
+import httpx
 import chainlit as cl
 from openai import AsyncOpenAI
 from dotenv import load_dotenv
@@ -184,7 +185,7 @@ openai_client = AsyncOpenAI(
     api_key=api_key,
     base_url="https://api.deepseek.com",
     max_retries=3,          # 优化：增加重试机制应对大模型偶发性服务器 502/网关拥塞
-    timeout=120.0           # 优化：设置合理超时防止无限挂起（深思模型首字响应易耗时）
+    timeout=httpx.Timeout(connect=10.0, read=15.0, write=10.0, pool=10.0) # 优化：细粒度超时防止无限挂起（特别是流式响应过程）
 ) if api_key else None
 
 # 如需使用 Prompt Playground 调试，可取消此行注释以追踪 OpenAI 调用
@@ -315,7 +316,7 @@ async def setup_agent(settings: dict[str, Any]) -> None:
     message_history = cl.user_session.get("message_history")
     if message_history and message_history[0]["role"] == "system":
         message_history[0]["content"] = system_prompt
-        cl.user_session.set("message_history", message_history)
+        # 由于是引用修改，无需再次 cl.user_session.set("message_history", message_history)
 
 @cl.on_message
 async def main(message: cl.Message):
@@ -407,8 +408,7 @@ async def main(message: cl.Message):
             msg.content = "（模型未返回任何内容）"
             await msg.send()
             await msg.update()
-        # 持久化对话历史到用户会话
-        cl.user_session.set("message_history", message_history)
+        # 由于 message_history 是内存引用，前面 append 已经生效，这里无需再 cl.user_session.set
 
     except asyncio.CancelledError:
         # 处理用户主动打断（点击停止生成）将抛出 CancelledError 异常
@@ -420,8 +420,7 @@ async def main(message: cl.Message):
         
         if msg_sent:
             await msg.update()
-        # 中断时不追加助手回复到历史（仅保留用户消息，下一轮可继续）
-        cl.user_session.set("message_history", message_history)
+        # 由于 message_history 是内存引用，中断时不追加相当于未修改对象，同样无需 cl.user_session.set
 
     except Exception as e:
         await cl.Message(content=f"⚠️ API 请求失败: {str(e)}").send()

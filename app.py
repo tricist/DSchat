@@ -1,10 +1,14 @@
 import os
 import re
 import asyncio
+import logging
 import chainlit as cl
 from openai import AsyncOpenAI
 from dotenv import load_dotenv
-from typing import Optional
+from typing import Optional, Any
+
+# 设置日志记录器
+logger = logging.getLogger(__name__)
 
 # 加载环境变量
 load_dotenv()
@@ -175,7 +179,7 @@ openai_client = AsyncOpenAI(
 #     cl.instrument_openai()
 
 
-async def persist_settings(settings: dict):
+async def persist_settings(settings: dict[str, Any]) -> None:
     """将当前设置持久化到线程 metadata 中。"""
     try:
         from chainlit.data import get_data_layer
@@ -187,7 +191,7 @@ async def persist_settings(settings: dict):
                 # 避免与 Chainlit 自动序列化的 user_session 在更新时产生浅拷贝合并冲突。
                 await dl.update_thread(thread_id=thread_id, metadata={"settings": settings})
     except Exception:
-        pass  # 持久化失败不影响主流程
+        logger.warning("Failed to persist settings", exc_info=True)  # 持久化失败不影响主流程
 
 
 # 优化：预编译正则表达式对象，显著提升 `resume_chat` 恢复大量历史步骤时的处理速度
@@ -284,7 +288,7 @@ async def resume_chat(thread: cl.types.ThreadDict):
 
 
 @cl.on_settings_update
-async def setup_agent(settings):
+async def setup_agent(settings: dict[str, Any]) -> None:
     cl.user_session.set("settings", settings)
     # 持久化设置到线程 metadata
     await persist_settings(settings)
@@ -329,7 +333,7 @@ async def main(message: cl.Message):
     msg_sent = False
     thinking_started = False  # 是否已有实际思考内容流式输出
     thinking_closed = False   # </details> 是否已闭合
-    full_response = ""
+    response_chunks = []
 
     # 准备 API 请求参数
     api_kwargs = {
@@ -370,7 +374,7 @@ async def main(message: cl.Message):
                 if not msg_sent:
                     await msg.send()
                     msg_sent = True
-                full_response += delta.content
+                response_chunks.append(delta.content)
                 await msg.stream_token(delta.content)
 
         # 确保 <details> 闭合（仅有思考、无实际回复内容时）

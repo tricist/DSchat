@@ -21,6 +21,11 @@ if not os.getenv("DATABASE_URL"):
         conn = sqlite3.connect("chainlit.db")
         c = conn.cursor()
         
+        # 优化：开启 WAL (Write-Ahead Logging) 模式，极大提升 SQLite 异步读写并发性能
+        # 防治基于 ASGI Web 框架多用户操作引发的 "database is locked" 异常
+        c.execute("PRAGMA journal_mode=WAL;")
+        c.execute("PRAGMA synchronous=NORMAL;")
+        
         c.execute("""CREATE TABLE IF NOT EXISTS users (
             id TEXT PRIMARY KEY,
             identifier TEXT UNIQUE NOT NULL,
@@ -160,7 +165,9 @@ DEFAULT_SETTINGS = {
 api_key = os.environ.get('DEEPSEEK_API_KEY')
 openai_client = AsyncOpenAI(
     api_key=api_key,
-    base_url="https://api.deepseek.com"
+    base_url="https://api.deepseek.com",
+    max_retries=3,          # 优化：增加重试机制应对大模型偶发性服务器 502/网关拥塞
+    timeout=120.0           # 优化：设置合理超时防止无限挂起（深思模型首字响应易耗时）
 ) if api_key else None
 
 # 如需使用 Prompt Playground 调试，可取消此行注释以追踪 OpenAI 调用
@@ -183,10 +190,13 @@ async def persist_settings(settings: dict):
         pass  # 持久化失败不影响主流程
 
 
+# 优化：预编译正则表达式对象，显著提升 `resume_chat` 恢复大量历史步骤时的处理速度
+THINKING_PATTERN = re.compile(r'<details[^>]*>.*?</details>\s*', flags=re.DOTALL)
+
 def strip_thinking(content: str) -> str:
     """从消息内容中移除 <details> 思考块，返回纯净的回复文本。
     用于从数据库恢复会话时，过滤掉思考 HTML 标记，只保留实际回复内容。"""
-    cleaned = re.sub(r'<details[^>]*>.*?</details>\s*', '', content, flags=re.DOTALL)
+    cleaned = THINKING_PATTERN.sub('', content)
     return cleaned.strip()
 
 @cl.on_chat_start

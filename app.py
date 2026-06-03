@@ -2,18 +2,18 @@ import os
 import re
 import asyncio
 import logging
+import logging.config
 import httpx
 import chainlit as cl
 from openai import AsyncOpenAI
 from dotenv import load_dotenv
 from typing import Optional, Any
 
-# 设置日志记录器
+# 设置日志记录器（logger 引用在模块级获取是安全的，真正的配置在 on_app_startup 中完成）
 logger = logging.getLogger(__name__)
 
-# 加载环境变量
+# 加载环境变量（必须在模块顶层，因为后续全局变量依赖环境变量初始化）
 load_dotenv()
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # --- 数据持久化层与初始化配置 ---
 async def _init_db_schema_async() -> None:
@@ -163,6 +163,38 @@ async def auth_callback(username: str, password: str) -> Optional[cl.User]:
     if username == "admin" and password == "admin":
         return cl.User(identifier="admin", metadata={"role": "admin"})
     return None
+
+# --- 应用级生命周期：日志配置 ---
+@cl.on_app_startup
+async def setup_logging() -> None:
+    """在 Chainlit 应用启动时配置日志系统。
+
+    使用 dictConfig 而非 basicConfig，原因：
+    1. dictConfig 会覆盖已有配置（basicConfig 在已有 handler 时是空操作）
+    2. Chainlit 2.9.2+ 已声明不全局设置 logging，我们的配置是唯一来源
+    3. disable_existing_loggers=False 确保第三方库（httpx、openai）的 logger 不受影响
+    """
+    logging.config.dictConfig({
+        "version": 1,
+        "disable_existing_loggers": False,
+        "formatters": {
+            "default": {
+                "format": "%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+            },
+        },
+        "handlers": {
+            "default": {
+                "class": "logging.StreamHandler",
+                "formatter": "default",
+            },
+        },
+        "root": {
+            "level": "INFO",
+            "handlers": ["default"],
+        },
+    })
+    logger.info("Logging configured successfully")
+
 
 # 定义系统提示词角色
 ROLES = {

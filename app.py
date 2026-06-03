@@ -3,11 +3,13 @@ import re
 import asyncio
 import logging
 import logging.config
+from enum import Enum, auto
+
 import httpx
 import chainlit as cl
 from openai import AsyncOpenAI
 from dotenv import load_dotenv
-from typing import Optional, Any
+from typing import Any
 
 # 设置日志记录器（logger 引用在模块级获取是安全的，真正的配置在 on_app_startup 中完成）
 logger = logging.getLogger(__name__)
@@ -157,7 +159,7 @@ if not os.getenv("DATABASE_URL"):
 
 # --- 密码认证（历史会话功能的前提） ---
 @cl.password_auth_callback
-async def auth_callback(username: str, password: str) -> Optional[cl.User]:
+async def auth_callback(username: str, password: str) -> cl.User | None:
     await _init_db_schema_async()
     # 在此处可对接自己的用户数据库，以下为演示账号
     if username == "admin" and password == "admin":
@@ -218,7 +220,8 @@ openai_client = AsyncOpenAI(
     api_key=api_key,
     base_url="https://api.deepseek.com",
     max_retries=3,          # 优化：增加重试机制应对大模型偶发性服务器 502/网关拥塞
-    timeout=httpx.Timeout(connect=10.0, read=15.0, write=10.0, pool=10.0) # 优化：细粒度超时防止无限挂起（特别是流式响应过程）
+    # read 超时设为 120 秒：reasoning_effort="max" 时模型可能思考 30~60 秒才产生首个 token
+    timeout=httpx.Timeout(connect=10.0, read=120.0, write=10.0, pool=10.0)
 ) if api_key else None
 
 # 如需使用 Prompt Playground 调试，可取消此行注释以追踪 OpenAI 调用
@@ -244,11 +247,19 @@ async def persist_settings(settings: dict[str, Any]) -> None:
 # 优化：预编译正则表达式对象，显著提升 `resume_chat` 恢复大量历史步骤时的处理速度
 THINKING_PATTERN = re.compile(r'<details[^>]*>.*?</details>\s*', flags=re.DOTALL)
 
+
 def strip_thinking(content: str) -> str:
     """从消息内容中移除 <details> 思考块，返回纯净的回复文本。
     用于从数据库恢复会话时，过滤掉思考 HTML 标记，只保留实际回复内容。"""
     cleaned = THINKING_PATTERN.sub('', content)
     return cleaned.strip()
+
+
+class StreamState(Enum):
+    """流式响应的状态机。取代原先 msg_sent / thinking_started / thinking_closed 三个布尔值。"""
+    IDLE = auto()       # 尚未发送任何内容
+    THINKING = auto()   # 正在输出 <details> 思考过程
+    ANSWERING = auto()  # 思考已闭合，正在输出正式回复
 
 @cl.on_chat_start
 async def start_chat():
@@ -314,7 +325,44 @@ async def resume_chat(thread: cl.types.ThreadDict):
     role_name = settings.get("role", "均衡默认")
     system_prompt = ROLES.get(role_name, ROLES["均衡默认"])
     cl.user_session.set("system_prompt", system_prompt)
-    
+
+    # 重新发送设置面板（否则切换历史对话后配置按钮会消失）
+    role_list = list(ROLES.keys())
+    model_list = ["deepseek-v4-pro", "deepseek-v4-flash"]
+    reasoning_list = ["high", "max"]
+
+    role_idx = role_list.index(settings["role"]) if settings["role"] in role_list else 0
+    model_idx = model_list.index(settings["model"]) if settings["model"] in model_list else 0
+    reasoning_idx = reasoning_list.index(settings["reasoning_effort"]) if settings.get("reasoning_effort") in reasoning_list else 0
+
+    await cl.ChatSettings(
+        [
+            cl.input_widget.Select(
+                id="role",
+                label="选择助手角色",
+                values=role_list,
+                initial_index=role_idx,
+            ),
+            cl.input_widget.Select(
+                id="model",
+                label="选择模型",
+                values=model_list,
+                initial_index=model_idx,
+            ),
+            cl.input_widget.Switch(
+                id="enable_thinking",
+                label="开启思考模式",
+                initial=settings.get("enable_thinking", True),
+            ),
+            cl.input_widget.Select(
+                id="reasoning_effort",
+                label="选择思考强度",
+                values=reasoning_list,
+                initial_index=reasoning_idx,
+            ),
+        ]
+    ).send()
+
     # 直接从入参 thread 重建 message_history
     message_history = [{"role": "system", "content": system_prompt}]
     for step in thread.get("steps", []):
@@ -379,9 +427,7 @@ async def main(message: cl.Message):
     # 使用单个 Message，思考过程用 <details> 包裹在消息内部
     # 这样每个对话轮次只产生一个 assistant step，确保数据库持久化与恢复正确
     msg = cl.Message(content="")
-    msg_sent = False
-    thinking_started = False  # 是否已有实际思考内容流式输出
-    thinking_closed = False   # </details> 是否已闭合
+    state = StreamState.IDLE
 
     # 准备 API 请求参数
     api_kwargs = {
@@ -405,30 +451,29 @@ async def main(message: cl.Message):
             # 处理思考过程
             reasoning = getattr(delta, 'reasoning_content', None)
             if reasoning:
-                if not msg_sent:
+                if state == StreamState.IDLE:
                     # 首个思考 token：先写入 <details> 开头再发送消息
                     msg.content = '<details open class="thinking-details">\n<summary>🤔 思考过程</summary>\n\n'
                     await msg.send()
-                    msg_sent = True
-                    thinking_started = True
+                    state = StreamState.THINKING
                 await msg.stream_token(reasoning)
 
             # 处理普通回复内容
             if delta.content:
-                if thinking_started and not thinking_closed:
+                if state == StreamState.THINKING:
                     # 思考结束 → 闭合 <details>，后续为正式回复
                     await msg.stream_token('\n</details>\n\n')
-                    thinking_closed = True
-                if not msg_sent:
+                    state = StreamState.ANSWERING
+                if state == StreamState.IDLE:
                     await msg.send()
-                    msg_sent = True
+                    state = StreamState.ANSWERING
                 await msg.stream_token(delta.content)
-                
+
         # 确保 <details> 闭合（仅有思考、无实际回复内容时）
-        if thinking_started and not thinking_closed:
+        if state == StreamState.THINKING:
             await msg.stream_token('\n</details>')
 
-        if msg_sent:
+        if state != StreamState.IDLE:
             await msg.update()
             # 将助手回复（去除思考 HTML 块）追加到对话历史
             clean_content = strip_thinking(msg.content)
@@ -443,13 +488,12 @@ async def main(message: cl.Message):
 
     except asyncio.CancelledError:
         # 处理用户主动打断（点击停止生成）将抛出 CancelledError 异常
-        if thinking_started and not thinking_closed:
+        if state == StreamState.THINKING:
             await msg.stream_token('\n</details>\n\n> ⚠️ *已在此处停止思考并中断生成*\n')
-            thinking_closed = True
         else:
             await msg.stream_token('\n\n> ⚠️ *回答生成已中断*\n')
-        
-        if msg_sent:
+
+        if state != StreamState.IDLE:
             await msg.update()
         # 由于 message_history 是内存引用，中断时不追加相当于未修改对象，同样无需 cl.user_session.set
 

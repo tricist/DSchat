@@ -200,14 +200,13 @@ async def setup_logging() -> None:
 
 # 定义系统提示词角色
 ROLES = {
-    "均衡默认": "你是乐于助人的AI助手。回答需清晰、简洁、逻辑分明。不知道的内容坦诚告知，不编造虚假信息。",
-    "编码大师": "你是顶级软件工程师。输出高质量、可直接运行的代码，遵循最佳实践，添加精练注释，指出边界条件和性能优化建议。",
-    "数学大师": "你是严谨的数学家。分步演算，总结核心定理。"
+    "通用模式": "你是乐于助人的AI助手。回答需清晰、简洁、逻辑分明。不知道的内容坦诚告知，不编造虚假信息。",
+    "懒人模式": "",  # 提示词由用户自行填写
 }
 
 # 默认设置
 DEFAULT_SETTINGS = {
-    "role": "均衡默认",
+    "role": "通用模式",
     "model": "deepseek-v4-pro",
     "enable_thinking": True,
     "reasoning_effort": "high",
@@ -322,8 +321,8 @@ async def start_chat():
     await persist_settings(settings_values)
     
     # 初始化系统提示词
-    role_name = settings_values["role"] if settings_values else "均衡默认"
-    system_prompt = ROLES.get(role_name, ROLES["均衡默认"])
+    role_name = settings_values["role"] if settings_values else "通用模式"
+    system_prompt = ROLES.get(role_name, ROLES["通用模式"])
     cl.user_session.set("system_prompt", system_prompt)
     # 初始化对话历史（仅含系统消息，后续每轮在 main 中基于内存追加，无需反复读库）
     cl.user_session.set("message_history", [{"role": "system", "content": system_prompt}])
@@ -342,8 +341,8 @@ async def resume_chat(thread: cl.types.ThreadDict):
 
     # user_session 已由 Chainlit 自动恢复，直接读取
     settings = cl.user_session.get("settings") or DEFAULT_SETTINGS
-    role_name = settings.get("role", "均衡默认")
-    system_prompt = ROLES.get(role_name, ROLES["均衡默认"])
+    role_name = settings.get("role", "通用模式")
+    system_prompt = ROLES.get(role_name, ROLES["通用模式"])
     cl.user_session.set("system_prompt", system_prompt)
 
     # 重新发送设置面板（否则切换历史对话后配置按钮会消失）
@@ -413,7 +412,7 @@ async def setup_agent(settings: dict[str, Any]) -> None:
     await persist_settings(settings)
     # 更新系统提示词，同步更新对话历史中的 system 消息
     role_name = settings["role"]
-    system_prompt = ROLES.get(role_name, ROLES["均衡默认"])
+    system_prompt = ROLES.get(role_name, ROLES["通用模式"])
     cl.user_session.set("system_prompt", system_prompt)
     # 同步更新对话历史中的系统消息（新的角色设定对后续对话生效）
     message_history = cl.user_session.get("message_history")
@@ -439,7 +438,7 @@ async def main(message: cl.Message):
     message_history = cl.user_session.get("message_history")
     if message_history is None:
         # Fallback，仅针对异常分支
-        message_history = [{"role": "system", "content": system_prompt or ROLES["均衡默认"]}]
+        message_history = [{"role": "system", "content": system_prompt or ROLES["通用模式"]}]
         cl.user_session.set("message_history", message_history)
     # 追加当前用户消息
     current_content = message.content or ""

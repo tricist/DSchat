@@ -202,7 +202,7 @@ async def setup_logging() -> None:
 ROLES = {
     "均衡默认": "你是乐于助人的AI助手。回答需清晰、简洁、逻辑分明。不知道的内容坦诚告知，不编造虚假信息。",
     "编码大师": "你是顶级软件工程师。输出高质量、可直接运行的代码，遵循最佳实践，添加精练注释，指出边界条件和性能优化建议。",
-    "数学大师": "你是严谨的数学家。用 LaTeX 表达数学：`$` 包裹行内公式，`$$` 包裹块级公式。`$$` 必须独占一行、前后换行，结束后空一行再写后续内容，禁止 `$` 与 `$$` 互相嵌套。分步演算，总结核心定理。"
+    "数学大师": "你是严谨的数学家。分步演算，总结核心定理。"
 }
 
 # 默认设置
@@ -253,6 +253,26 @@ def strip_thinking(content: str) -> str:
     用于从数据库恢复会话时，过滤掉思考 HTML 标记，只保留实际回复内容。"""
     cleaned = THINKING_PATTERN.sub('', content)
     return cleaned.strip()
+
+
+# 预编译 LaTeX 分隔符正则：Chainlit 使用 KaTeX 渲染，KaTeX 只认 $...$ / $$...$$，
+# 但大模型常输出标准 LaTeX 分隔符 \(...\) / \[...\]，需要归一化。
+_LATEX_DISPLAY_RE = re.compile(r'\\\[([\s\S]*?)\\\]')
+_LATEX_INLINE_RE = re.compile(r'\\\(([\s\S]*?)\\\)')
+
+
+def normalize_latex_delimiters(content: str) -> str:
+    """将大模型输出的标准 LaTeX 分隔符转换为 KaTeX 兼容的 $ 分隔符。
+
+    转换规则：
+      \\[...\\]  →  $$...$$   （块级公式）
+      \\(...\\)  →  $...$     （行内公式）
+
+    先处理块级再处理行内，避免行内替换干扰块级匹配。
+    """
+    content = _LATEX_DISPLAY_RE.sub(r'$$\1$$', content)
+    content = _LATEX_INLINE_RE.sub(r'$\1$', content)
+    return content
 
 
 class StreamState(Enum):
@@ -376,6 +396,8 @@ async def resume_chat(thread: cl.types.ThreadDict):
         elif step_type == "assistant_message":
             content = step.get("output", "")
             if content and isinstance(content, str):
+                # 先归一化 LaTeX 分隔符，再剥离思考块
+                content = normalize_latex_delimiters(content)
                 content = strip_thinking(content)
                 if content:
                     message_history.append({"role": "assistant", "content": content})
@@ -474,6 +496,9 @@ async def main(message: cl.Message):
             await msg.stream_token('\n</details>')
 
         if state != StreamState.IDLE:
+            # 归一化 LaTeX 分隔符：\(...\) → $...$，\[...\] → $$...$$
+            # 必须在 msg.update() 之前处理，确保前端 KaTeX 能正确渲染
+            msg.content = normalize_latex_delimiters(msg.content)
             await msg.update()
             # 将助手回复（去除思考 HTML 块）追加到对话历史
             clean_content = strip_thinking(msg.content)

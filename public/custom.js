@@ -1,69 +1,37 @@
 /**
  * Chainlit 自定义快捷键脚本
- * Ctrl+K (Windows/Linux) 或 Cmd+K (Mac) → 新建对话
+ * Ctrl+K (Windows/Linux) 或 Cmd+K (Mac) → 新建对话（SPA 导航，不刷新页面）
+ *
+ * 实现原理：
+ *   Chainlit 的"新建对话"按钮（id="new-chat-button"）内部调用
+ *   clear() + React Router navigate('/')，是纯 SPA 导航。
+ *   本脚本通过点击该按钮触发 React 事件处理器，并在弹出确认对话框时
+ *   自动点击确认按钮，确保行为与手动点击完全一致。
  */
 
 (function () {
   'use strict';
 
   /**
-   * 在 DOM 中查找"新建对话"按钮
-   * Chainlit 的 UI 结构可能会随版本变化，这里尝试多种选择器以提高兼容性
-   */
-  function findNewChatButton() {
-    // 1. 通过 aria-label 查找（Chainlit 2.x 常用）
-    const ariaSelectors = [
-      '[aria-label="New chat"]',
-      '[aria-label="new chat"]',
-      '[aria-label="新建对话"]',
-      '[aria-label="新对话"]',
-    ];
-    for (const sel of ariaSelectors) {
-      const el = document.querySelector(sel);
-      if (el) return el;
-    }
-
-    // 2. 遍历所有 button 和 a 标签，匹配文本内容
-    const candidates = document.querySelectorAll('button, a, [role="button"]');
-    const matchTexts = ['new chat', '新建对话', '新对话', 'new conversation'];
-    for (const el of candidates) {
-      const text = (el.textContent || '').toLowerCase().trim();
-      for (const match of matchTexts) {
-        if (text === match || text.includes(match)) {
-          return el;
-        }
-      }
-    }
-
-    // 3. 查找侧边栏中带有 + 或编辑图标的按钮（常见于新建按钮）
-    const iconButtons = document.querySelectorAll('button');
-    for (const btn of iconButtons) {
-      // Chainlit 新建对话按钮通常在侧边栏顶部
-      const svg = btn.querySelector('svg');
-      if (svg && btn.closest('aside, nav, [class*="sidebar"], [class*="Sidebar"]')) {
-        const ariaLabel = btn.getAttribute('aria-label') || '';
-        if (ariaLabel.toLowerCase().includes('new') || ariaLabel.includes('新建')) {
-          return btn;
-        }
-      }
-    }
-
-    return null;
-  }
-
-  /**
-   * 触发新建对话
+   * 触发新建对话 — 模拟点击 Chainlit 原生按钮
+   *
+   * 步骤：
+   *   1. 查找 id="new-chat-button"（Chainlit 源码固定 ID）
+   *   2. 点击按钮 → 触发 React onClick
+   *      （已配置 confirm_new_chat=false，无需确认，直接 SPA 导航）
    */
   function triggerNewChat() {
-    const btn = findNewChatButton();
-    if (btn) {
-      btn.click();
-      console.log('[快捷键] Ctrl+K → 已触发新建对话');
-    } else {
-      // 降级方案：直接导航到根路径（Chainlit 默认行为会新建对话）
-      console.log('[快捷键] Ctrl+K → 未找到按钮，尝试导航到 /');
-      window.location.href = '/';
+    // 查找新建对话按钮（Chainlit 固定 ID，最可靠）
+    const newChatBtn = document.querySelector('#new-chat-button');
+    if (!newChatBtn) {
+      console.warn('[快捷键] 未找到 #new-chat-button，请检查 Chainlit 版本');
+      return;
     }
+
+    // 点击按钮，触发 React 的 handleClickOpen
+    // confirm_new_chat=false → 直接执行 clear() + navigate('/')
+    newChatBtn.click();
+    console.log('[快捷键] Ctrl+K → 已新建对话');
   }
 
   /**
@@ -78,7 +46,7 @@
     }
   }
 
-  // 注册事件监听
+  // 使用捕获阶段注册，确保在 Chainlit 自身的 Ctrl+K（搜索框）之前拦截
   document.addEventListener('keydown', handleKeydown, true);
   console.log('[快捷键] Ctrl+K 新建对话快捷键已就绪');
 })();

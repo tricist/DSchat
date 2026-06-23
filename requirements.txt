@@ -3,3 +3,5 @@ openai
 python-dotenv
 httpx
 aiosqlite
+sqlalchemy
+tavily-python

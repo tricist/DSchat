@@ -10,3 +10,5 @@ chainlit.db
 chainlit.db-shm
 chainlit.db-wal
 chainlit.md
+.vscode/
+backApp.py

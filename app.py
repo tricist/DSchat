@@ -1,5 +1,7 @@
+# pyright: reportArgumentType=false, reportCallIssue=false, reportAttributeAccessIssue=false
 import os
 import re
+import json
 import asyncio
 import logging
 import logging.config
@@ -8,6 +10,7 @@ from enum import Enum, auto
 import httpx
 import chainlit as cl
 from openai import AsyncOpenAI
+from tavily import AsyncTavilyClient
 from dotenv import load_dotenv
 from typing import Any
 
@@ -210,6 +213,7 @@ DEFAULT_SETTINGS = {
     "model": "deepseek-v4-pro",
     "enable_thinking": True,
     "reasoning_effort": "high",
+    "enable_web_search": True,
 }
 
 # --- 全局 API 客户端 ---
@@ -226,6 +230,70 @@ openai_client = AsyncOpenAI(
 # 如需使用 Prompt Playground 调试，可取消此行注释以追踪 OpenAI 调用
 # if openai_client:
 #     cl.instrument_openai()
+
+# --- Tavily 联网搜索配置 ---
+TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY")
+
+# 联网搜索工具定义（OpenAI/DeepSeek Function Calling 兼容格式）
+WEB_SEARCH_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "web_search",
+        "description": (
+            "搜索互联网获取最新信息、实时数据和新闻。"
+            "当需要查询当前事件、最新动态、不确定的事实、或者超出知识截止日期的问题时使用此工具。"
+            "返回包含标题、URL 和内容摘要的搜索结果。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "搜索关键词或问题，应使用简洁有效的搜索词以获得最佳结果",
+                }
+            },
+            "required": ["query"],
+        },
+    },
+}
+
+
+async def execute_web_search(query: str) -> str:
+    """执行联网搜索并返回格式化的搜索结果字符串。
+
+    Args:
+        query: 搜索查询关键词。
+
+    Returns:
+        格式化后的搜索结果文本，包含标题、URL 和内容摘要。
+    """
+    if not TAVILY_API_KEY:
+        return "⚠️ 未配置 TAVILY_API_KEY 环境变量，无法执行联网搜索。"
+
+    client = AsyncTavilyClient(api_key=TAVILY_API_KEY)
+    try:
+        response = await client.search(
+            query=query,
+            search_depth="advanced",
+            max_results=5,
+        )
+        results = response.get("results", [])
+        if not results:
+            return "未找到相关搜索结果。"
+
+        formatted_parts: list[str] = []
+        for i, r in enumerate(results, 1):
+            title = r.get("title", "无标题")
+            url = r.get("url", "")
+            content = r.get("content", "无内容")
+            formatted_parts.append(f"[{i}] {title}\n    URL: {url}\n    {content}")
+
+        return "\n\n".join(formatted_parts)
+    except Exception as e:
+        logger.warning("Web search failed for query '%s': %s", query, e)
+        return f"⚠️ 搜索失败: {str(e)}"
+    finally:
+        await client.close()
 
 
 async def persist_settings(settings: dict[str, Any]) -> None:
@@ -313,6 +381,11 @@ async def start_chat():
                 values=["high", "max"],
                 initial_index=0,
             ),
+            cl.input_widget.Switch(
+                id="enable_web_search",
+                label="🔍 联网搜索",
+                initial=True,
+            ),
         ]
     ).send()
 
@@ -322,7 +395,15 @@ async def start_chat():
     
     # 初始化系统提示词
     role_name = settings_values["role"] if settings_values else "通用模式"
-    system_prompt = ROLES.get(role_name, ROLES["通用模式"])
+    base_prompt = ROLES.get(role_name, ROLES["通用模式"])
+    # 如果启用了联网搜索，追加搜索能力说明
+    if settings_values.get("enable_web_search", True) and TAVILY_API_KEY:
+        system_prompt = (
+            base_prompt + " 你可以使用 web_search 工具搜索互联网获取最新信息。"
+            "当用户询问实时数据、最新新闻或你需要确认的事实信息时，请主动搜索。"
+        )
+    else:
+        system_prompt = base_prompt
     cl.user_session.set("system_prompt", system_prompt)
     # 初始化对话历史（仅含系统消息，后续每轮在 main 中基于内存追加，无需反复读库）
     cl.user_session.set("message_history", [{"role": "system", "content": system_prompt}])
@@ -342,7 +423,14 @@ async def resume_chat(thread: cl.types.ThreadDict):
     # user_session 已由 Chainlit 自动恢复，直接读取
     settings = cl.user_session.get("settings") or DEFAULT_SETTINGS
     role_name = settings.get("role", "通用模式")
-    system_prompt = ROLES.get(role_name, ROLES["通用模式"])
+    base_prompt = ROLES.get(role_name, ROLES["通用模式"])
+    if settings.get("enable_web_search", True) and TAVILY_API_KEY:
+        system_prompt = (
+            base_prompt + " 你可以使用 web_search 工具搜索互联网获取最新信息。"
+            "当用户询问实时数据、最新新闻或你需要确认的事实信息时，请主动搜索。"
+        )
+    else:
+        system_prompt = base_prompt
     cl.user_session.set("system_prompt", system_prompt)
 
     # 重新发送设置面板（否则切换历史对话后配置按钮会消失）
@@ -379,6 +467,11 @@ async def resume_chat(thread: cl.types.ThreadDict):
                 values=reasoning_list,
                 initial_index=reasoning_idx,
             ),
+            cl.input_widget.Switch(
+                id="enable_web_search",
+                label="🔍 联网搜索",
+                initial=settings.get("enable_web_search", True),
+            ),
         ]
     ).send()
 
@@ -400,6 +493,8 @@ async def resume_chat(thread: cl.types.ThreadDict):
                 content = strip_thinking(content)
                 if content:
                     message_history.append({"role": "assistant", "content": content})
+        # 注意：tool 类型的 step 是中间步骤，不需重建到对话历史中
+        # 模型在后续回答中会基于已有的 assistant 回答内容进行推理
                     
     # 保存重建后的历史到 session
     cl.user_session.set("message_history", message_history)
@@ -412,7 +507,14 @@ async def setup_agent(settings: dict[str, Any]) -> None:
     await persist_settings(settings)
     # 更新系统提示词，同步更新对话历史中的 system 消息
     role_name = settings["role"]
-    system_prompt = ROLES.get(role_name, ROLES["通用模式"])
+    base_prompt = ROLES.get(role_name, ROLES["通用模式"])
+    if settings.get("enable_web_search", True) and TAVILY_API_KEY:
+        system_prompt = (
+            base_prompt + " 你可以使用 web_search 工具搜索互联网获取最新信息。"
+            "当用户询问实时数据、最新新闻或你需要确认的事实信息时，请主动搜索。"
+        )
+    else:
+        system_prompt = base_prompt
     cl.user_session.set("system_prompt", system_prompt)
     # 同步更新对话历史中的系统消息（新的角色设定对后续对话生效）
     message_history = cl.user_session.get("message_history")
@@ -433,6 +535,7 @@ async def main(message: cl.Message):
     model = settings["model"] if settings else "deepseek-v4-pro"
     enable_thinking = settings["enable_thinking"] if settings else True
     reasoning_effort = settings["reasoning_effort"] if settings else "high"
+    enable_web_search = settings.get("enable_web_search", True) if settings else True
 
     # 获取对话历史：新会话在 start_chat 初始化，恢复会话在 resume_chat 初始化
     message_history = cl.user_session.get("message_history")
@@ -445,26 +548,100 @@ async def main(message: cl.Message):
     if current_content:
         message_history.append({"role": "user", "content": current_content})
 
+    # 构建 extra_body（DeepSeek 专有参数统一放此处，避免与 OpenAI SDK 类型重载冲突）
+    extra_body: dict[str, Any] = {
+        "thinking": {"type": "enabled" if enable_thinking else "disabled"}
+    }
+    if enable_thinking:
+        extra_body["reasoning_effort"] = reasoning_effort
+
+    # 是否启用工具
+    tools: list[dict[str, Any]] | None = None
+    if enable_web_search and TAVILY_API_KEY:
+        tools = [WEB_SEARCH_TOOL]
+
     # 使用单个 Message，思考过程用 <details> 包裹在消息内部
     # 这样每个对话轮次只产生一个 assistant step，确保数据库持久化与恢复正确
     msg = cl.Message(content="")
     state = StreamState.IDLE
 
-    # 准备 API 请求参数
-    api_kwargs = {
-        "model": model,
-        "messages": message_history,
-        "stream": True,
-    }
-    if enable_thinking:
-        api_kwargs["reasoning_effort"] = reasoning_effort
-        api_kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
-    else:
-        api_kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
-
     try:
-        # 请求大模型流式响应
-        stream = await client.chat.completions.create(**api_kwargs)
+        # =====================================================================
+        # 阶段 1：工具调用检测（非流式）
+        # 如果启用了联网搜索工具，先做一次非流式调用来检测模型是否需要搜索。
+        # - 需要搜索 → 执行搜索，追加结果到历史，进入阶段 2 流式输出最终答案
+        # - 不需要搜索 → 直接展示非流式响应中的答案（此时无需二次调用）
+        # =====================================================================
+        tool_calls_made = False
+        if tools:
+            tool_response = await client.chat.completions.create(
+                model=model,
+                messages=message_history,
+                tools=tools,
+                tool_choice="auto",
+                extra_body=extra_body,
+            )
+            assistant_msg = tool_response.choices[0].message
+            message_history.append(assistant_msg)
+
+            if assistant_msg.tool_calls:
+                # 模型决定使用工具 → 执行搜索
+                tool_calls_made = True
+                for tool_call in assistant_msg.tool_calls:
+                    if tool_call.function.name == "web_search":
+                        args = json.loads(tool_call.function.arguments)
+                        query = args.get("query", current_content)
+
+                        # 在 Chainlit UI 中显示搜索步骤
+                        async with cl.Step(name="🔍 联网搜索", type="tool") as step:
+                            step.input = query
+                            search_result = await execute_web_search(query)
+                            step.output = search_result
+
+                        # 追加工具结果到对话历史
+                        message_history.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": search_result,
+                        })
+            else:
+                # 模型直接回答（无需搜索）
+                reasoning = getattr(assistant_msg, 'reasoning_content', None) or ""
+                content = assistant_msg.content or ""
+
+                # 展示思考过程 + 回答
+                if reasoning:
+                    msg.content = (
+                        '<details open class="thinking-details">\n'
+                        f'<summary>🤔 思考过程</summary>\n\n{reasoning}\n</details>\n\n{content}'
+                    )
+                else:
+                    msg.content = content
+
+                msg.content = normalize_latex_delimiters(msg.content)
+                await msg.send()
+                await msg.update()
+
+                # 追加纯净回复到历史（已在前面 append assistant_msg）
+                clean_content = strip_thinking(msg.content)
+                if not clean_content and content:
+                    # 无思考块时，直接用原始 content
+                    pass  # message_history 已有 assistant_msg
+
+                return  # 直接返回，无需进入流式阶段
+
+        # =====================================================================
+        # 阶段 2：流式输出最终回复
+        # 仅在以下情况到达此处：
+        # - 模型使用了工具，需要基于搜索结果生成最终答案
+        # - 未启用工具（无 TAVILY_API_KEY 或用户关闭了联网搜索）
+        # =====================================================================
+        stream = await client.chat.completions.create(
+            model=model,
+            messages=message_history,
+            stream=True,
+            extra_body=extra_body,
+        )
 
         async for chunk in stream:
             delta = chunk.choices[0].delta

@@ -213,7 +213,7 @@ DEFAULT_SETTINGS = {
     "model": "deepseek-v4-pro",
     "enable_thinking": True,
     "reasoning_effort": "high",
-    "enable_web_search": True,
+    "enable_web_search": False,
 }
 
 # --- 全局 API 客户端 ---
@@ -384,7 +384,7 @@ async def start_chat():
             cl.input_widget.Switch(
                 id="enable_web_search",
                 label="🔍 联网搜索",
-                initial=True,
+                initial=False,
             ),
         ]
     ).send()
@@ -397,7 +397,7 @@ async def start_chat():
     role_name = settings_values["role"] if settings_values else "通用模式"
     base_prompt = ROLES.get(role_name, ROLES["通用模式"])
     # 如果启用了联网搜索，追加搜索能力说明
-    if settings_values.get("enable_web_search", True) and TAVILY_API_KEY:
+    if settings_values.get("enable_web_search", False) and TAVILY_API_KEY:
         system_prompt = (
             base_prompt + " 你可以使用 web_search 工具搜索互联网获取最新信息。"
             "当用户询问实时数据、最新新闻或你需要确认的事实信息时，请主动搜索。"
@@ -424,7 +424,7 @@ async def resume_chat(thread: cl.types.ThreadDict):
     settings = cl.user_session.get("settings") or DEFAULT_SETTINGS
     role_name = settings.get("role", "通用模式")
     base_prompt = ROLES.get(role_name, ROLES["通用模式"])
-    if settings.get("enable_web_search", True) and TAVILY_API_KEY:
+    if settings.get("enable_web_search", False) and TAVILY_API_KEY:
         system_prompt = (
             base_prompt + " 你可以使用 web_search 工具搜索互联网获取最新信息。"
             "当用户询问实时数据、最新新闻或你需要确认的事实信息时，请主动搜索。"
@@ -470,7 +470,7 @@ async def resume_chat(thread: cl.types.ThreadDict):
             cl.input_widget.Switch(
                 id="enable_web_search",
                 label="🔍 联网搜索",
-                initial=settings.get("enable_web_search", True),
+                initial=settings.get("enable_web_search", False),
             ),
         ]
     ).send()
@@ -508,7 +508,7 @@ async def setup_agent(settings: dict[str, Any]) -> None:
     # 更新系统提示词，同步更新对话历史中的 system 消息
     role_name = settings["role"]
     base_prompt = ROLES.get(role_name, ROLES["通用模式"])
-    if settings.get("enable_web_search", True) and TAVILY_API_KEY:
+    if settings.get("enable_web_search", False) and TAVILY_API_KEY:
         system_prompt = (
             base_prompt + " 你可以使用 web_search 工具搜索互联网获取最新信息。"
             "当用户询问实时数据、最新新闻或你需要确认的事实信息时，请主动搜索。"
@@ -535,7 +535,7 @@ async def main(message: cl.Message):
     model = settings["model"] if settings else "deepseek-v4-pro"
     enable_thinking = settings["enable_thinking"] if settings else True
     reasoning_effort = settings["reasoning_effort"] if settings else "high"
-    enable_web_search = settings.get("enable_web_search", True) if settings else True
+    enable_web_search = settings.get("enable_web_search", False) if settings else False
 
     # 获取对话历史：新会话在 start_chat 初始化，恢复会话在 resume_chat 初始化
     message_history = cl.user_session.get("message_history")
